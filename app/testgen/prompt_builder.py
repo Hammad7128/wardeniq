@@ -878,6 +878,16 @@ OUTPUT SCHEMA — begin with endpoint_analysis, then api_tests:
         {{ "content": "When POST /api/v1/events is called with a valid payload", "expectedResult": "The request reaches authorization and validation checks." }},
         {{ "content": "Then the response status is 403 Forbidden", "expectedResult": "The API returns 403 Forbidden." }}
       ],
+      "request": {{
+        "query": {{}},
+        "headers": {{}},
+        "body": {{ "title": "Team offsite", "starts_at": "2026-01-01T10:00:00Z" }}
+      }},
+      "response_assertions": {{
+        "contains": [],
+        "excludes": [],
+        "json_keys": ["detail"]
+      }},
       "expected_result": {{
         "status_code": 403,
         "db_changes": [],
@@ -886,7 +896,18 @@ OUTPUT SCHEMA — begin with endpoint_analysis, then api_tests:
       }}
     }}
   ]
-}}""".strip()
+}}
+
+EXECUTABILITY: `request` and `response_assertions` make a case runnable against a live
+staging environment, so fill them whenever the documents give you enough to do so.
+- `request.body` — a concrete, realistic payload for the call. Use only fields the
+  evidence actually mentions; omit the key entirely for GET/DELETE or when the
+  documents do not specify a payload. Never invent field names to look complete.
+- `response_assertions.json_keys` — top-level response keys the caller can rely on.
+- `response_assertions.contains` / `excludes` — exact substrings that must (or must
+  not) appear in the response body. Leave empty rather than guessing.
+An omitted or empty block is fine and expected; a fabricated one is not, because these
+values are executed verbatim.""".strip()
 
 def build_api_agent_prompt(
     context: dict,

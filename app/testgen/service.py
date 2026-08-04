@@ -22,6 +22,8 @@ from testgen.prompt_builder import (
     is_few_shot_leak,
 )
 from testgen.lineage import (
+    REUSE_SIMILARITY_API,
+    REUSE_SIMILARITY_GENERAL,
     derive_scenario_kind,
     generate_test_identity_hash,
     generate_test_slug,
@@ -603,7 +605,7 @@ def _semantic_reuse_compatible(candidate: dict, case: dict, test_type: str) -> b
             return False
         return token_set_similarity(
             lineage_token_set(previous), lineage_token_set(current)
-        ) >= 0.35
+        ) >= REUSE_SIMILARITY_API
     if test_type == "ui":
         return (
             str(previous.get("field") or previous.get("element") or "").strip().lower()
@@ -619,7 +621,7 @@ def _semantic_reuse_compatible(candidate: dict, case: dict, test_type: str) -> b
         return False
     return token_set_similarity(
         lineage_token_set(previous), lineage_token_set(current)
-    ) >= 0.65
+    ) >= REUSE_SIMILARITY_GENERAL
 
 
 def _persist_case(store, embedder, feature_id, project_id, case: dict, test_type: str,
@@ -1085,7 +1087,7 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
         }
 
     log_progress(update_job_fn, "Generation complete", 100)
-    return {
+    out = {
         "cases_new": cases_new,
         "cases_reused": cases_reused,
         "steps_new": steps_new,
@@ -1097,3 +1099,17 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
         "rag_gap_count": len(gaps),
         "errors": errors,
     }
+    # Semantic dedup silently returns nothing when vector search is down and the case
+    # store is too big for the in-memory fallback. Surface that on the job instead of
+    # letting the run look clean — otherwise near-duplicates land with no warning.
+    degraded = getattr(store, "search_degraded", lambda *_a, **_k: None)("dedup")
+    if degraded:
+        out["dedup_degraded"] = degraded
+        out["warnings"] = (out.get("warnings") or []) + [
+            "Semantic de-duplication was SKIPPED for this run: vector search was "
+            f"unavailable and the case store ({degraded.get('docs')} cases) exceeds the "
+            f"in-memory fallback cap ({degraded.get('cap')}). Near-duplicate cases may "
+            "have been created. Restore mongot and re-run to de-duplicate."
+        ]
+        log_progress(update_job_fn, "WARNING: semantic de-duplication was skipped (search degraded)")
+    return out

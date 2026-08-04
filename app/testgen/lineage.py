@@ -1,10 +1,29 @@
 # app/testgen/lineage.py
 import hashlib
+import os
 import re
 
 LINEAGE_SIMILARITY_THRESHOLD = 0.45
 LINEAGE_AMBIGUITY_MARGIN = 0.1
 LINEAGE_HIGH_CONFIDENCE = 0.75
+
+# ---------------------------------------------------------------------------
+# Jaccard (token-set) thresholds for deciding whether an existing test case may be
+# REUSED for a newly generated one. Both gate `token_set_similarity` below.
+#
+# API cases can afford a LOWER bar because they are already constrained by hard
+# structural equality first (same method, same normalized endpoint, compatible
+# scenario kind) — the token overlap is only a final tie-breaker on wording. Non-API
+# cases have no such structural key, so they need a HIGHER bar to avoid merging two
+# genuinely different behaviours that happen to share vocabulary.
+#
+# CALIBRATION STATUS: these values are hand-picked, not empirically derived. Raising
+# them reduces false merges (distinct cases collapsed into one) at the cost of more
+# duplicates; lowering them does the reverse. Re-tune them against labelled
+# duplicate/non-duplicate pairs — see tests/eval/ and `python -m tests.eval.run_eval
+# --dedup` for the harness that measures the trade-off.
+REUSE_SIMILARITY_API = float(os.getenv("WARDENIQ_REUSE_SIM_API", "0.35"))
+REUSE_SIMILARITY_GENERAL = float(os.getenv("WARDENIQ_REUSE_SIM_GENERAL", "0.65"))
 
 LINEAGE_STOPWORDS = {
     'a', 'an', 'the', 'is', 'are', 'to', 'of', 'for', 'with', 'and', 'or', 'test', 'tests',

@@ -55,6 +55,19 @@ ENV_FILE_PATH = os.getenv("ENV_FILE_PATH", "/app/.env")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
 GEN_MODEL = os.getenv("GEN_MODEL", "qwen2.5:3b")
+# How many independent passes the Mind Map reviewer makes per batch. >1 keeps a
+# 'covered' verdict only when every pass agrees (cross-sample self-consistency),
+# trading N x tokens for markedly less hallucination variance. 1 = single pass.
+MINDMAP_SAMPLES = max(1, int(os.getenv("MINDMAP_SAMPLES", "1")))
+# Mind Map retrieval shape. These used to be hard-coded (rank 24, <=2 chunks/file, 20
+# chunks total) and became THE binding constraint once the excerpt character budget was
+# fixed: auth.controller.ts holds ~6 function chunks but could contribute only 2, so
+# sendOtp never reached the reviewer and every sendOtp case was judged "no implementation
+# code provided" - while verifyOtp, which happened to be picked, was correctly found.
+# Selection is now driven by the character budget instead of a chunk count.
+# (Retrieval is now uncapped: the whole pool is ranked and every chunk is reviewed in
+# windows. The former rank/chunk/per-file rationing knobs are gone — they existed only to
+# choose what to throw away.)
 DB_NAME = os.getenv("DB_NAME", "wardeniq")
 VERSION = "0.1.0-beta"
 AUTO_SETUP = os.getenv("AUTO_SETUP", "true").lower() == "true"
@@ -5908,6 +5921,7 @@ def _codeanalysis_worker(jid, params):
     repo_ids = params.get("repo_ids") or []
     branches = params.get("branches") or {}          # {repo_id: branch}
     branch_override = (params.get("branch") or "").strip()   # legacy global fallback
+    force_reindex = bool(params.get("force_reindex"))
     docs = _implementation_repo_docs(project_id, repo_ids)
     repos = [{**r, "id": str(r["_id"])} for r in docs]
     if not repos:
@@ -5925,7 +5939,12 @@ def _codeanalysis_worker(jid, params):
         except Exception:  # noqa: BLE001
             head = None
         meta = store.get_code_index(repo["id"])
-        if head and meta and meta.get("sha") == head and \
+        # Reuse requires BOTH an unchanged branch head AND an index built by the current
+        # exclusion rules. The rules fingerprint is what makes `force_reindex` unnecessary
+        # in normal use: change what counts as a spec file and every stale index rebuilds
+        # itself, instead of quietly serving chunks filtered by the old rules.
+        rules_ok = (meta or {}).get("rules") == cov.INDEX_RULES_FINGERPRINT
+        if not force_reindex and rules_ok and head and meta and meta.get("sha") == head and \
                 store.code_chunks.count_documents({"repo_id": repo["id"]}) > 0:
             store.update_job(jid, stage=f"reusing index — {repo['full_name']}@{ref} (unchanged)")
             paths = set()
@@ -5967,7 +5986,8 @@ def _codeanalysis_worker(jid, params):
         if batch:
             store.add_code_chunks(batch)
         if head:
-            store.set_code_index(repo["id"], head, repo_chunks, len(repo_paths))
+            store.set_code_index(repo["id"], head, repo_chunks, len(repo_paths),
+                                 rules=cov.INDEX_RULES_FINGERPRINT)
         per_repo.append({"repo": repo["full_name"], "branch": ref or "default",
                          "git_provider": provider,
                          "files_in_repo": stats["total_files"], "code_matched": len(files),
@@ -6072,23 +6092,37 @@ def _codeanalysis_worker(jid, params):
         pool = [(r, p, t, e) for (r, p, t, e) in mem if likely_impl_path(p)] or list(mem)
         texts = [f"{p} {t}" for (r, p, t, e) in pool]      # path + code = lexical document
         vecs = [e for (r, p, t, e) in pool]
-        order = grounding.hybrid_rank_indices(query_text, texts, q, vecs, top_k=min(len(pool), 24))
-        chosen, per_file = [], {}
-        for i in order:
-            r, p, t, e = pool[i]
-            if per_file.get((r, p), 0) >= 2:      # ≤2 chunks per file, keep breadth
-                continue
-            per_file[(r, p)] = per_file.get((r, p), 0) + 1
-            chosen.append((r, p, t, e))
-            if len(chosen) >= 20:
-                break
+        # Rank the ENTIRE pool. A top_k here decided what was never even considered, which
+        # is a cap wearing a ranking's clothes.
+        order = grounding.hybrid_rank_indices(query_text, texts, q, vecs, top_k=len(pool))
+        # NO CAPS. Every retrieved chunk is handed to the reviewer, which sweeps them in
+        # as many context-sized windows as it takes (coverage.window_excerpts). Rank order
+        # is kept so the most relevant code is read first and cases resolve early, but
+        # nothing is discarded: previously only ~20 chunks were shown and the remainder was
+        # dropped, so "we never looked at it" was reported as "uncovered".
+        chosen = [pool[i] for i in order]
         excerpts = [{"repo": r, "path": p, "text": t} for (r, p, t, _e) in chosen]
         reviewed_files = sorted({f"{r}:{p}" for (r, p, _t, _e) in chosen})
-        res = cov.review_code_coverage(lm, f["name"], full.get("text", ""), cases, excerpts)
+        # MINDMAP_SAMPLES>1 judges each batch repeatedly and keeps 'covered' only when the
+        # samples agree (costs N x tokens; cuts hallucination variance). Default 1 = off.
+        # progress= keeps the job heartbeat alive. The exhaustive sweep is 10x+ longer than
+        # the single pass it replaced and easily outlives STALE_JOB_TTL_SECONDS, so without
+        # this the stale-job sweeper marks a perfectly healthy run "worker heartbeat lost".
+        res = cov.review_code_coverage(lm, f["name"], full.get("text", ""), cases, excerpts,
+                                       samples=MINDMAP_SAMPLES,
+                                       progress=lambda m: store.update_job(jid, stage=m))
         res["reviewed_files"] = reviewed_files
         store.save_code_coverage(fid, project_id, res, repo_names)
+        g = res.get("grounding") or {}
         print(f"[wardenIQ][mindmap] feature '{f['name']}': reviewed {len(reviewed_files)} "
               f"implementation files (hybrid retrieval); files={reviewed_files}", flush=True)
+        # Grounding is the accuracy signal - log it so a bad run is visible in the logs
+        # rather than only discoverable by clicking through the UI.
+        print(f"[wardenIQ][mindmap] feature '{f['name']}': grounding - "
+              f"{g.get('needs_review_count', 0)} case(s) need review, "
+              f"{g.get('citations_rejected_total', 0)} fabricated citation(s) rejected, "
+              f"{g.get('downgraded_count', 0)} verdict(s) downgraded, "
+              f"samples={g.get('samples', 1)}", flush=True)
         mapped += 1
         store.merge_job_result(jid, features_mapped=mapped)
     store.merge_job_result(jid, features_mapped=mapped)
@@ -6102,6 +6136,11 @@ class CodeAnalyzeIn(BaseModel):
     repo_ids: list[str] = []          # empty → all repos in the project
     branches: dict[str, str] = {}     # {repo_id: branch}; missing → repo's default
     branch: str = ""                  # legacy global override (applied if no per-repo branch)
+    # Re-fetch and re-index even when the branch head is unchanged. Needed after the
+    # test/spec exclusion rules change: cached chunks were filtered by the OLD rules, so
+    # spec files already in the index keep being retrieved (and keep eating the excerpt
+    # budget) until something forces a rebuild.
+    force_reindex: bool = False
 
 
 @app.post("/api/code-analysis")
@@ -6111,7 +6150,8 @@ def code_analysis(body: CodeAnalyzeIn, request: Request):
     if not repos:
         raise HTTPException(404, "no implementation repos to analyze")
     jid = launch_job("codeanalysis", {"project_id": body.project_id, "repo_ids": body.repo_ids,
-                                      "branches": body.branches, "branch": body.branch.strip()},
+                                      "branches": body.branches, "branch": body.branch.strip(),
+                                      "force_reindex": body.force_reindex},
                      label=f"Mind Map — {len(repos)} repo(s)",
                      project_id=body.project_id)
     return {"job_id": jid}

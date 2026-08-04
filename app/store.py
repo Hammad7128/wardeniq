@@ -64,6 +64,12 @@ class Store:
         self.validator_answers = self.db["validator_answers"]
         self.test_plan_runs = self.db["test_plan_runs"]
         self.counters = self.db["counters"]
+        # Records when a search path silently degraded (mongot down AND the store is too
+        # large for the exact numpy fallback). Without this, a skipped dedup lookup is
+        # indistinguishable from "no duplicates found" - so a generation run would create
+        # near-duplicates with nothing but a log line to show for it. Callers check
+        # `search_degraded()` and surface it; see testgen.service.
+        self._degraded: dict = {}
         self.documents = self.db["stored_documents"]
 
     def ping(self):
@@ -382,10 +388,13 @@ class Store:
     def get_code_index(self, repo_id):
         return self.code_index.find_one({"repo_id": repo_id})
 
-    def set_code_index(self, repo_id, sha, count, impl_files):
+    def set_code_index(self, repo_id, sha, count, impl_files, rules: str = ""):
+        """Record a repo's index state. `rules` fingerprints the test/spec exclusion rules
+        that produced these chunks, so changing those rules invalidates the index by
+        itself — an index built under older rules must never be silently reused."""
         self.code_index.update_one({"repo_id": repo_id}, {"$set": {
             "repo_id": repo_id, "sha": sha, "count": count, "impl_files": impl_files,
-            "updated_at": time.time()}}, upsert=True)
+            "rules": rules, "updated_at": time.time()}}, upsert=True)
 
     def search_code_chunks(self, query_embedding, project_id=None, repo_ids=None, limit=16):
         """Retrieve the most relevant production-code chunks for a query embedding.
@@ -1517,6 +1526,9 @@ class Store:
         # mongot unavailable — fall back to exact numpy, but only if the store is small
         # enough to scan in memory. On a large store we fail SAFE (dedup degrades to
         # "no reuse" for this call) rather than risk OOM / multi-second latency.
+        # NOTE: the [] below is AMBIGUOUS to a caller - it means "we didn't look", not
+        # "nothing similar exists". Check `store.search_degraded('dedup')` to tell them
+        # apart before reporting a run as clean.
         if not self._numpy_fallback_ok("dedup"):
             return []
         return self._find_similar_cases_numpy(embedding, suggest, exclude_id, top, project_id)
@@ -1531,8 +1543,34 @@ class Store:
                   f"{NUMPY_FALLBACK_MAX_DOCS}); skipping exact numpy fallback for {what} "
                   f"(degraded) to avoid OOM. Restore mongot to resume full search.",
                   flush=True)
+            # Make it inspectable, not just printed: a log line in a container nobody is
+            # tailing is not an alert. Callers turn this into a job warning / health flag.
+            rec = self._degraded.setdefault(what, {"count": 0, "first_at": time.time()})
+            rec["count"] += 1
+            rec["last_at"] = time.time()
+            rec["docs"] = n
+            rec["cap"] = NUMPY_FALLBACK_MAX_DOCS
+            rec["reason"] = ("mongot unavailable and the case store exceeds the in-memory "
+                            "fallback cap, so exact search was skipped")
             return False
         return True
+
+    def search_degraded(self, what: str | None = None):
+        """Has a search path silently degraded? Returns the record(s), or None/{} if clean.
+
+        `what` is the subsystem name passed to `_numpy_fallback_ok` ('dedup',
+        'case search', ...). Truthy result means results were INCOMPLETE, not empty.
+        """
+        if what is not None:
+            return self._degraded.get(what)
+        return dict(self._degraded)
+
+    def clear_search_degraded(self, what: str | None = None):
+        """Reset degradation state (call once mongot is confirmed healthy again)."""
+        if what is None:
+            self._degraded.clear()
+        else:
+            self._degraded.pop(what, None)
 
     def _find_similar_cases_mongot(self, embedding, suggest, exclude_id, top, project_id):
         # The cases vector index only declares a `type` filter, so project scoping is

@@ -39,6 +39,41 @@ class TestIsTestFile:
         assert cov.is_test_file("") is False
         assert cov.is_test_file(None) is False
 
+    # Regression: these all read as production code in a real Mind Map run and were
+    # cited as evidence for 'covered' verdicts. The bare `spec/` pattern matched only the
+    # singular, un-prefixed directory, so whole spec trees were indexed as implementation.
+    SPEC_TREE_PATHS = [
+        "backend/src/wardon-specs/login-flow/bus-1-no-name-join.ts",
+        "backend/src/wardon-specs/login-flow/bus-3-no-interests.ts",
+        "backend/specs/auth.ts",
+        "backend/spec/auth.ts",
+        "api/api_specs/users.py",
+        "src/acceptance-tests/checkout.ts",
+        "src/__specs__/thing.ts",
+        "src/login-spec.ts",
+        "src/checkout.e2e.ts",
+    ]
+
+    def test_detects_spec_trees_and_plural_forms(self):
+        for p in self.SPEC_TREE_PATHS:
+            assert cov.is_test_file(p) is True, f"expected test/spec file: {p}"
+
+    # Guard the other direction: widening the pattern must not swallow real source.
+    NEAR_MISS_IMPL_PATHS = [
+        "backend/src/controllers/auth.controller.ts",
+        "backend/src/middlewares/auth.middleware.ts",
+        "backend/src/server1.ts",
+        "src/aspects/logging.ts",          # contains "spec" as a substring
+        "src/inspector/probe.ts",          # ditto
+        "src/test-utils/helpers.ts",       # helper dir, not a test tree
+        "src/latest/index.ts",             # ends in "test" mid-word
+        "lib/respec/render.ts",
+    ]
+
+    def test_does_not_swallow_production_paths(self):
+        for p in self.NEAR_MISS_IMPL_PATHS:
+            assert cov.is_test_file(p) is False, f"expected impl file: {p}"
+
 
 # --------------------------------------------------------------------------- extract_key
 class TestExtractKey:

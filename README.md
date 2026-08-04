@@ -613,6 +613,79 @@ startup and secrets.
 | `MONGO_IMAGE` / `MONGOT_IMAGE` | pinned | Override the bundled MongoDB / mongot images |
 | `APP_IMAGE` | `adlerqa/wardeniq:latest` _(set by the installer; empty = build from source)_ | Which published image tag to run. `latest` tracks every release; pin e.g. `adlerqa/wardeniq:0.2.0` to freeze a version |
 
+### Accuracy & verification knobs
+
+These control how much wardenIQ trusts its own LLM verdicts. Defaults are safe; raise the
+strictness when a verdict is going in front of someone who will act on it.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `COVERAGE_REVIEW_THRESHOLD` | `0.7` | Coverage verdicts at or below this confidence are flagged **needs review** in the result instead of being trusted outright. Raise it to send more borderline verdicts to a human |
+| `MINDMAP_SAMPLES` | `1` | How many independent passes the Mind Map reviewer makes per batch. `2`+ keeps a `covered` verdict **only when every pass agrees**, cutting hallucination variance - at N x the tokens |
+| `WARDENIQ_REUSE_SIM_API` | `0.35` | Token-similarity floor for reusing an existing **API** test case (applied after method/endpoint/scenario must already match exactly) |
+| `WARDENIQ_REUSE_SIM_GENERAL` | `0.65` | Same floor for non-API cases. **Not empirically calibrated** - see the measured trade-off in `tests/eval/dataset.py` (`KNOWN_LIMITATION_PAIRS`) before changing it |
+| `NUMPY_FALLBACK_MAX_DOCS` | `20000` | Above this many cases, the in-memory exact-search fallback is skipped when vector search is down. Runs affected by this now carry an explicit `dedup_degraded` warning rather than looking clean |
+| `MINDMAP_EXCERPT_PER_CHARS` | `4000` | Characters of a single source chunk shown to the reviewer. Chunks are whole function bodies, so a low value cuts them mid-function — the previous fixed 900 showed only 27% of a typical controller and produced false `uncovered` verdicts on endpoints that demonstrably exist |
+| `MINDMAP_EXCERPT_TOTAL_CHARS` | _(derived)_ | Total code budget per review call. Left unset it is derived from the model's real context window, so the prompt cannot overflow. Set it only to override that calculation |
+| `MINDMAP_EXCERPT_TOTAL_CHARS_HOSTED` | `60000` | Code budget when a hosted provider is configured (100k+ contexts, so far more source fits than a local model allows) |
+| `MINDMAP_REVIEW_MAX_TOKENS` | `2000` | Output tokens reserved for the reviewer's reply. Every token reserved here is one fewer available for source code; the old 4000 crowded out the code it was meant to judge |
+| `OLLAMA_MAX_NUM_CTX` | `8192` | Hard ceiling on the context requested from a local Ollama model. Raising it on a machine with spare RAM **automatically widens the code window** (the excerpt budget is derived from it), which is the single biggest lever on Mind Map accuracy for local models |
+
+| `MINDMAP_MAX_WINDOWS` | `0` _(unlimited)_ | Safety valve on the exhaustive sweep. `0` reads the **entire** retrieved corpus, however many windows that takes. Set a number only if you need to bound cost |
+| `MINDMAP_BATCH_SIZE` | `10` | Test cases judged per call. Lower it to give each case more of the model's attention |
+
+### Mind Map reads the whole codebase
+
+Coverage review is **exhaustive**. Every production chunk retrieved for a feature is
+actually read: the corpus is swept in as many context-sized windows as it takes, and a
+case is only reported `uncovered` after *every* window has failed to find its
+implementation. Cases proven `covered` drop out early, so the sweep costs far less than
+the worst case suggests.
+
+This replaced a hard cap that showed the reviewer the first ~20 chunks and discarded the
+rest — on a 101-file repository that meant judging 5% of the code and reporting the
+result as a verdict about all of it. Expect more LLM calls per feature than before, and
+correspondingly more trustworthy verdicts; `MINDMAP_MAX_WINDOWS` bounds it if needed.
+
+> **Changing the test/spec exclusion rules re-indexes automatically.** A repo's code
+> index records a fingerprint of the rules that produced it, so a rules change
+> invalidates every stale index by itself — you do not have to know to rebuild. The
+> `force_reindex: true` flag on `/api/code-analysis` remains for the unrelated case of
+> wanting a fresh fetch at an unchanged branch head.
+
+**Executing API tests for real** (off unless `API_EXEC_BASE_URL` is set - there is no
+default target, so this can never accidentally fire traffic at production):
+
+| Var | Default | Purpose |
+|---|---|---|
+| `API_EXEC_BASE_URL` | _(empty = disabled)_ | Base URL of a staging/sandbox environment to run API test cases against, turning them from a written expectation into an observed pass/fail |
+| `API_EXEC_ALLOW_MUTATING` | `false` | Permit `POST`/`PUT`/`PATCH`/`DELETE`. Off by default because the usual target is shared |
+| `API_EXEC_HEADERS` | _(empty)_ | JSON object of headers sent with every request, e.g. `{"Authorization":"Bearer ..."}` |
+| `API_EXEC_TIMEOUT_SECONDS` / `API_EXEC_VERIFY_TLS` | `20` / `true` | Per-request timeout; set verify to `false` only for a self-signed staging cert |
+
+**Optional deterministic scanners.** If `semgrep` and/or `gitleaks` are on `PATH`, their
+findings are attached to coverage verdicts as *corroborating evidence* (they never change
+a verdict). Neither is a dependency - with both absent, behaviour is unchanged. Set
+`SEMGREP_CONFIG` to a local rules path for a strictly offline install, and
+`SCANNER_TIMEOUT_SECONDS` / `SCANNER_MAX_BYTES` / `SCANNER_MAX_FINDINGS` to bound the run.
+
+### Measuring accuracy
+
+`tests/eval/` scores the coverage and dedup logic against hand-labelled ground truth, so a
+prompt or model change produces a number instead of an impression:
+
+```bash
+python -m tests.eval.run_eval                      # offline: grounding probes + dedup
+python -m tests.eval.run_eval --coverage \
+    --provider ollama --model qwen2.5:7b           # real-model coverage accuracy
+```
+
+The offline sections are deterministic and expected to score `1.0`, so they're safe to
+gate CI on (non-zero exit on regression). The `--coverage` section needs a reachable LLM
+and reports per-status precision/recall plus an **overclaim rate** - how often a verdict
+claimed *more* coverage than the truth, tracked separately because saying "tested" about
+untested behaviour is a worse error than the reverse.
+
 SMTP (for sign-in emails) is set under **Configuration → Email** (stored encrypted, takes
 precedence) or via `SMTP_*` vars in `.env`. Until SMTP exists, the first admin's code is
 printed to the server log (see [Signing in](#signing-in-the-very-first-time)). AWS Bedrock

@@ -3,10 +3,18 @@ Mistral / any OpenAI-compatible endpoint). One `chat_json` entrypoint; the rest 
 the app never cares which provider is configured.
 """
 import json
+import os
+
 import httpx
 
 import usage
 from prompts import SYSTEM, build_prompt, TYPE_GUIDANCE
+
+# Upper bound on the context window requested from a local Ollama model. Kept modest by
+# default because a large num_ctx on a CPU-only container thrashes memory; raise it when
+# the host can afford it (see coverage.excerpt_total_chars, which scales the amount of
+# source code shown to the reviewer from this same number).
+OLLAMA_MAX_NUM_CTX = int(os.getenv("OLLAMA_MAX_NUM_CTX", "8192"))
 
 TEST_TYPES = list(TYPE_GUIDANCE.keys())  # functional, e2e, api, nfr
 
@@ -118,8 +126,12 @@ class LLM:
         if self.provider == "bedrock":
             return self._bedrock_chat(system, user, temperature, max_tokens)
         if self.provider == "ollama":
-            # Cap num_ctx for local Ollama at 8192 to prevent memory thrashing/crashes on CPU
-            ollama_ctx = min(num_ctx or 8192, 8192)
+            # Cap num_ctx for local Ollama to prevent memory thrashing/crashes on CPU.
+            # Configurable because the cap also bounds how much source code the Mind Map
+            # reviewer can be shown (see coverage.excerpt_total_chars): on a machine with
+            # RAM to spare, raising OLLAMA_MAX_NUM_CTX widens the code window and directly
+            # improves coverage accuracy. Default is unchanged at 8192.
+            ollama_ctx = min(num_ctx or 8192, OLLAMA_MAX_NUM_CTX)
             r = httpx.post(f"{self.ollama_url}/api/chat",
                            timeout=timeout_seconds or 300.0,
                            headers=self._ollama_headers(), json={
