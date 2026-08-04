@@ -64,6 +64,7 @@ class Store:
         self.validator_answers = self.db["validator_answers"]
         self.test_plan_runs = self.db["test_plan_runs"]
         self.counters = self.db["counters"]
+        self.documents = self.db["stored_documents"]
 
     def ping(self):
         self.client.admin.command("ping"); return True
@@ -77,9 +78,12 @@ class Store:
                      "feature_imports", "project_imported_rows",
                      "project_imported_row_sources", "project_imported_row_feature_map",
                      "project_imported_row_promotions",
-                     "project_imported_row_corrections", "import_analysis_status"]:
+                     "project_imported_row_corrections", "import_analysis_status",
+                     "stored_documents"]:
             if name not in self.db.list_collection_names():
                 self.db.create_collection(name)
+        self.documents.create_index([("project_id", 1), ("created_at", -1)])
+        self.documents.create_index([("feature_id", 1)])
         self.users.create_index([("email", 1)], unique=True)
         self.assoc.create_index([("feature_id", 1), ("test_case_id", 1)], unique=True)
         self.repos.create_index([("project_id", 1), ("full_name", 1)], unique=True)
@@ -2948,6 +2952,8 @@ class Store:
                 "project_ids": u.get("project_ids", []),
                 "otp_hash": u.get("otp_hash"), "otp_expires": u.get("otp_expires", 0),
                 "otp_attempts": u.get("otp_attempts", 0),
+                "reset_hash": u.get("reset_hash"), "reset_expires": u.get("reset_expires", 0),
+                "reset_attempts": u.get("reset_attempts", 0),
                 # Local admin password (bootstrap "admin" account only). Never
                 # surfaced over the API — main.py's _user_public() doesn't whitelist
                 # it; this is just the internal store-level representation.
@@ -3076,6 +3082,19 @@ class Store:
     def clear_otp(self, uid):
         self.users.update_one({"_id": ObjectId(uid)},
                               {"$unset": {"otp_hash": "", "otp_expires": "", "otp_attempts": ""}})
+
+    # ---- password reset codes ----------------------------------------------------
+    def set_reset_code(self, uid, reset_hash, expires):
+        self.users.update_one({"_id": ObjectId(uid)},
+                              {"$set": {"reset_hash": reset_hash, "reset_expires": expires,
+                                        "reset_attempts": 0}})
+
+    def inc_reset_attempts(self, uid):
+        self.users.update_one({"_id": ObjectId(uid)}, {"$inc": {"reset_attempts": 1}})
+
+    def clear_reset_code(self, uid):
+        self.users.update_one({"_id": ObjectId(uid)},
+                              {"$unset": {"reset_hash": "", "reset_expires": "", "reset_attempts": ""}})
 
     # ---- invite tokens (separate from OTP so login codes never overwrite invites) --
     def set_invite_token(self, uid, token_hash, expires):
@@ -3794,3 +3813,39 @@ class Store:
             {"feature_id": feature_id},
             {"$set": {"stale": True, "stale_at": time.time()}})
         return getattr(res, "modified_count", 0)
+
+    # ---- AWS S3 / stored documents -------------------------------------------
+    def save_stored_document(self, doc_data: dict) -> str:
+        doc = dict(doc_data)
+        if "created_at" not in doc:
+            doc["created_at"] = time.time()
+        res = self.documents.insert_one(doc)
+        return str(res.inserted_id)
+
+    def get_stored_document(self, doc_id: str) -> dict | None:
+        try:
+            d = self.documents.find_one({"_id": ObjectId(doc_id)})
+            if d:
+                d["id"] = str(d.pop("_id"))
+            return d
+        except Exception:
+            return None
+
+    def list_stored_documents(self, project_id: str = None, feature_id: str = None, limit: int = 100) -> list[dict]:
+        query = {}
+        if project_id:
+            query["project_id"] = project_id
+        if feature_id:
+            query["feature_id"] = feature_id
+        out = []
+        for d in self.documents.find(query).sort("created_at", -1).limit(limit):
+            d["id"] = str(d.pop("_id"))
+            out.append(d)
+        return out
+
+    def delete_stored_document(self, doc_id: str) -> bool:
+        try:
+            res = self.documents.delete_one({"_id": ObjectId(doc_id)})
+            return getattr(res, "deleted_count", 0) > 0
+        except Exception:
+            return False

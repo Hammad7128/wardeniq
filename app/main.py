@@ -342,6 +342,7 @@ def _webhook_base_url(request: Request | None = None) -> str:
 # screen); external webhooks carry their own secret/signature.
 PUBLIC_EXACT = {"/", "/invite", "/favicon.ico", "/logo2.png", "/api/auth/request-otp", "/api/auth/verify-otp",
                 "/api/auth/me", "/api/auth/logout", "/api/auth/smtp-status", "/api/auth/login-password",
+                "/api/auth/request-password-reset", "/api/auth/reset-password", "/api/auth/reset-password-master",
                 # Self-service invite endpoints: they authenticate the caller via the
                 # session cookie themselves (_session_user), so they bypass the
                 # role-based gateway (any signed-in user, incl. viewers, may accept
@@ -357,7 +358,7 @@ PUBLIC_EXACT = {"/", "/invite", "/favicon.ico", "/logo2.png", "/api/auth/request
 PUBLIC_PREFIX = ("/assets/",) if IS_PRODUCTION else ("/assets/", "/docs", "/redoc", "/openapi")
 # Admin-only areas (config + user management). Matched by exact or "<p>/..." prefix.
 ADMIN_PATHS = ("/api/users", "/api/settings", "/api/llm/test", "/api/jira/test",
-               "/api/smtp/test", "/api/audit-logs", "/api/db-status", "/api/db-config",
+               "/api/smtp/test", "/api/settings/s3/test", "/api/audit-logs", "/api/db-status", "/api/db-config",
                "/api/db-migrate")
 # Read-style POSTs that viewers are allowed to call.
 VIEWER_POST_OK = ("/api/retrieve",)
@@ -898,7 +899,19 @@ def bootstrap():
     # already changed in-app. A value that fails the policy is ignored with a warning
     # (the account then keeps the admin123 default + its forced-change flow).
     try:
-        if ADMIN_PASSWORD:
+        reset_env_pw = os.getenv("RESET_ADMIN_PASSWORD", "").strip() or os.getenv("ADMIN_PASSWORD_FORCE", "").strip()
+        if reset_env_pw:
+            errs = auth.password_policy_errors(reset_env_pw)
+            if errs:
+                print("[wardenIQ][WARNING] RESET_ADMIN_PASSWORD does not meet policy "
+                      f"({', '.join(errs)}); ignoring it.", flush=True)
+            else:
+                admin = store.get_user_by_email("admin")
+                if not admin:
+                    admin = store.create_user("admin", "Admin", "admin")
+                store.set_user_password(admin["id"], auth.hash_password(reset_env_pw))
+                print("[wardenIQ] Force-reset local admin password from RESET_ADMIN_PASSWORD environment variable.", flush=True)
+        elif ADMIN_PASSWORD:
             errs = auth.password_policy_errors(ADMIN_PASSWORD)
             if errs:
                 print("[wardenIQ][WARNING] ADMIN_PASSWORD does not meet the policy "
@@ -2500,10 +2513,12 @@ async def create_feature(request: Request, name: str = Form(...), project_id: st
     # Combine every uploaded doc (PRD/HLD/LLD/…) + pasted text into one corpus,
     # each section labelled so the LLM and the embeddings keep document context.
     parts, sources, pdf_urls = [], [], []
+    raw_files_info = []
     for f in (files or []):
         if not f or not f.filename:
             continue
         data = await f.read()
+        raw_files_info.append((f.filename, data, getattr(f, "content_type", None)))
         txt = extract_text(f.filename, data)
         if txt.strip():
             parts.append(f"### Document: {f.filename}\n{txt}")
@@ -2551,6 +2566,24 @@ async def create_feature(request: Request, name: str = Form(...), project_id: st
     emb = embedder.embed((base_raw or name)[:2000])
     fid = store.create_feature(name, pid, sources, base_raw, summary, emb, key=epic_key,
                                match_key=((match_key or "").strip().upper() or None))
+
+    # Auto-upload raw document files to AWS S3 if S3 document storage is configured
+    from s3_storage import s3_storage
+    if s3_storage.is_configured():
+        for filename, content_bytes, content_type in raw_files_info:
+            try:
+                meta = s3_storage.upload_document(
+                    filename=filename,
+                    content=content_bytes,
+                    content_type=content_type,
+                    project_id=pid,
+                    feature_id=fid,
+                )
+                meta["project_id"] = pid
+                meta["feature_id"] = fid
+                store.save_stored_document(meta)
+            except Exception as e:
+                print(f"[wardenIQ][s3-auto-upload-warn] {e!r}", flush=True)
 
     if not external:
         # Fast path: only local docs / pasted text — index + generate inline (unchanged).
@@ -4158,6 +4191,14 @@ def get_settings():
         "embed_region": s.get("embed_region", ""),
         "embed_api_key_set": bool(s.get("embed_api_key_enc")),
         "embed_model_options": EMBED_MODEL_OPTIONS,
+        # AWS S3 Document Storage
+        "s3_enabled": bool(s.get("s3_enabled")),
+        "s3_bucket": s.get("s3_bucket", ""),
+        "s3_region": s.get("s3_region", ""),
+        "s3_access_key_id": s.get("s3_access_key_id", ""),
+        "s3_secret_access_key_set": bool(s.get("s3_secret_access_key_enc")),
+        "s3_prefix": s.get("s3_prefix", "documents"),
+        "s3_configured": bool(s.get("s3_bucket")),
     }
 
 
@@ -4181,6 +4222,12 @@ class SettingsIn(BaseModel):
     figma_api_token: str | None = None
     llm_prices: dict | None = None
     poll_interval_s: int | None = None
+    s3_enabled: bool | None = None
+    s3_bucket: str | None = None
+    s3_region: str | None = None
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+    s3_prefix: str | None = None
 
 
 def _merged_settings_dict(body: SettingsIn):
@@ -4207,6 +4254,14 @@ def _merged_settings_dict(body: SettingsIn):
         "smtp_from": body.smtp_from.strip() if body.smtp_from is not None else s.get("smtp_from", ""),
         "smtp_tls": body.smtp_tls if body.smtp_tls is not None else s.get("smtp_tls", True),
         "smtp_ssl": body.smtp_ssl if body.smtp_ssl is not None else s.get("smtp_ssl", False),
+        "s3_enabled": body.s3_enabled if body.s3_enabled is not None else s.get("s3_enabled", False),
+        "s3_bucket": body.s3_bucket.strip() if body.s3_bucket is not None else s.get("s3_bucket", ""),
+        "s3_region": body.s3_region.strip() if body.s3_region is not None else s.get("s3_region", ""),
+        "s3_access_key_id": body.s3_access_key_id.strip() if body.s3_access_key_id is not None else s.get("s3_access_key_id", ""),
+        "s3_secret_access_key": body.s3_secret_access_key.strip() if (body.s3_secret_access_key is not None and body.s3_secret_access_key.strip() != "") else (
+            crypto.decrypt(s.get("s3_secret_access_key_enc", "")) if s.get("s3_secret_access_key_enc") else ""
+        ),
+        "s3_prefix": body.s3_prefix.strip() if body.s3_prefix is not None else s.get("s3_prefix", "documents"),
     }
 
 
@@ -4344,6 +4399,21 @@ def put_settings(body: SettingsIn, request: Request):
         upd["smtp_ssl"] = body.smtp_ssl
     if body.figma_api_token is not None:
         upd["figma_api_token_enc"] = crypto.encrypt(body.figma_api_token) if body.figma_api_token else ""
+    if body.s3_enabled is not None:
+        upd["s3_enabled"] = body.s3_enabled
+    if body.s3_bucket is not None:
+        upd["s3_bucket"] = body.s3_bucket.strip()
+    if body.s3_region is not None:
+        upd["s3_region"] = body.s3_region.strip()
+    if body.s3_access_key_id is not None:
+        upd["s3_access_key_id"] = body.s3_access_key_id.strip()
+    if body.s3_secret_access_key is not None:
+        if body.s3_secret_access_key.strip() != "":
+            upd["s3_secret_access_key_enc"] = crypto.encrypt(body.s3_secret_access_key.strip())
+        elif not body.s3_bucket:
+            upd["s3_secret_access_key_enc"] = ""
+    if body.s3_prefix is not None:
+        upd["s3_prefix"] = body.s3_prefix.strip()
     if body.poll_interval_s is not None:
         # Floor to MIN_POLL_INTERVAL so a stray small value can't hammer the GitHub API.
         # Applies to the poller on its next loop — no restart needed.
@@ -4513,6 +4583,22 @@ def _deliver_otp(email, code, recipient_name="", is_admin=False):
 
     print(f"[wardenIQ][OTP send failed for {email}: {err}]", flush=True)
     return "error", err
+
+
+def _deliver_reset_code(target_name: str, email: str, code: str):
+    """Deliver password reset code via SMTP email ONLY. Never prints codes to logs."""
+    cfg = _smtp_cfg()
+    if not cfg:
+        return "no_smtp", "SMTP is not configured"
+
+    if email and auth.is_valid_email(email):
+        ok, err = email_send.send_otp(cfg, email, code, recipient_name=target_name)
+        if ok:
+            return "sent", ""
+        print(f"[wardenIQ][Password Reset send failed for {email}: {err}]", flush=True)
+        return "error", err
+    else:
+        return "no_email", "User has no valid email address configured"
 
 class OtpRequestIn(BaseModel):
     email: str
@@ -4695,6 +4781,125 @@ def change_password(body: ChangePasswordIn, request: Request, response: Response
                         max_age=auth.SESSION_TTL, httponly=True, samesite="lax",
                         secure=auth.COOKIE_SECURE, path="/")
     return {"changed": True, "user": _user_public(updated)}
+
+
+class RequestPasswordResetIn(BaseModel):
+    username_or_email: str
+
+
+class ResetPasswordIn(BaseModel):
+    username_or_email: str
+    code: str
+    new_password: str
+
+
+@app.post("/api/auth/request-password-reset")
+def request_password_reset(body: RequestPasswordResetIn):
+    cfg = _smtp_cfg()
+    if not cfg:
+        return {"sent": False, "smtp_configured": False,
+                "message": "SMTP is not configured. Admin password can be reset via Docker CLI or environment variable."}
+
+    target = (body.username_or_email or "").strip()
+    if not target:
+        raise HTTPException(400, "Username or email is required")
+
+    user = store.get_user_by_email(target.lower())
+    if not user and (target.lower() == "admin" or target == "admin"):
+        user = store.get_user_by_email("admin")
+
+    if not user or not user.get("active"):
+        # Generic response to prevent user enumeration
+        return {"sent": True, "smtp_configured": True, "message": "If an account exists, a 6-digit reset code has been sent to your email."}
+
+    code = auth.gen_otp()
+    store.set_reset_code(user["id"], auth.hash_otp(code), time.time() + auth.OTP_TTL)
+
+    target_email = user.get("email") if auth.is_valid_email(user.get("email")) else ""
+    mode, detail = _deliver_reset_code(user.get("name") or target, target_email, code)
+
+    if mode == "error":
+        raise HTTPException(502, "Could not send password reset email. Please check your SMTP configuration under Settings.")
+    if mode in ("no_smtp", "no_email"):
+        return {"sent": False, "smtp_configured": False,
+                "message": "Password reset via email is unavailable. Use Docker CLI to reset the password."}
+
+    return {"sent": True, "smtp_configured": True, "message": "A 6-digit reset code has been sent to your email address."}
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(body: ResetPasswordIn):
+    target = (body.username_or_email or "").strip()
+    if not target:
+        raise HTTPException(400, "Username or email is required")
+    if not body.code or not body.code.strip():
+        raise HTTPException(400, "Reset code is required")
+
+    user = store.get_user_by_email(target.lower())
+    if not user and (target.lower() == "admin" or target == "admin"):
+        user = store.get_user_by_email("admin")
+
+    if not user or not user.get("active"):
+        raise HTTPException(401, "Invalid request or reset code")
+
+    if not user.get("reset_hash") or user.get("reset_expires", 0) < time.time():
+        raise HTTPException(401, "Reset code expired — please request a new one")
+
+    if user.get("reset_attempts", 0) >= auth.OTP_MAX_ATTEMPTS:
+        raise HTTPException(429, "Too many failed attempts — please request a new reset code")
+
+    if not auth.otp_matches(user["reset_hash"], body.code.strip()):
+        store.inc_reset_attempts(user["id"])
+        raise HTTPException(401, "Invalid reset code")
+
+    errs = auth.password_policy_errors(body.new_password)
+    if errs:
+        raise HTTPException(400, "Password must have " + ", ".join(errs) + ".")
+
+    store.clear_reset_code(user["id"])
+    store.set_user_password(user["id"], auth.hash_password(body.new_password))
+
+    return {"reset": True, "message": "Password reset successfully. You can now sign in."}
+
+
+class ResetPasswordMasterIn(BaseModel):
+    username: str = "admin"
+    app_secret: str
+    new_password: str
+
+
+@app.post("/api/auth/reset-password-master")
+def reset_password_master(body: ResetPasswordMasterIn):
+    """Web-native admin password reset using the container's APP_SECRET."""
+    provided_secret = (body.app_secret or "").strip()
+    if not provided_secret:
+        raise HTTPException(400, "App Master Secret (APP_SECRET) is required")
+
+    effective_secret = auth._session_secret()
+    if not hmac.compare_digest(provided_secret, effective_secret):
+        raise HTTPException(401, "Invalid App Master Secret")
+
+    target = (body.username or "admin").strip()
+    user = store.get_user_by_email(target.lower())
+    if not user and (target.lower() == "admin" or target == "admin"):
+        user = store.get_user_by_email("admin")
+
+    if not user:
+        if target.lower() == "admin" or target == "admin":
+            user = store.create_user("admin", "Admin", "admin")
+        else:
+            raise HTTPException(404, f"User '{target}' not found")
+
+    if not user.get("active"):
+        raise HTTPException(401, "User account is deactivated")
+
+    errs = auth.password_policy_errors(body.new_password)
+    if errs:
+        raise HTTPException(400, "Password must have " + ", ".join(errs) + ".")
+
+    store.set_user_password(user["id"], auth.hash_password(body.new_password))
+    store.clear_reset_code(user["id"])
+    return {"reset": True, "message": "Password reset successfully using App Master Secret. You can now sign in."}
 
 
 @app.get("/api/auth/me")
@@ -5196,6 +5401,130 @@ def smtp_test(body: OtpRequestIn):
         raise HTTPException(502, "could not send the test email — check the SMTP host, "
                                  "port, credentials and TLS/SSL settings")
     return {"ok": True, "sent_to": body.email}
+
+
+class S3TestIn(BaseModel):
+    bucket: str | None = None
+    region: str | None = None
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+
+
+@app.post("/api/settings/s3/test")
+def s3_test(body: S3TestIn):
+    from s3_storage import s3_storage
+    secret_key = body.secret_access_key
+    if not secret_key:
+        s = store.get_settings()
+        if s.get("s3_secret_access_key_enc"):
+            secret_key = crypto.decrypt(s.get("s3_secret_access_key_enc"))
+    res = s3_storage.test_connection(
+        bucket=body.bucket,
+        region=body.region,
+        access_key_id=body.access_key_id,
+        secret_access_key=secret_key,
+    )
+    if not res.get("ok"):
+        raise HTTPException(400, detail=res.get("error", "AWS S3 connection test failed"))
+    return res
+
+
+# --------------------------------------------------------------- AWS S3 Documents
+@app.post("/api/documents/upload")
+async def upload_document_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    project_id: str = Form(""),
+    feature_id: str = Form(""),
+):
+    from s3_storage import s3_storage
+    if not file or not file.filename:
+        raise HTTPException(400, detail="No file provided")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, detail="File is empty")
+    if not s3_storage.is_configured():
+        raise HTTPException(400, detail="AWS S3 document storage is not configured or enabled in Settings")
+    try:
+        meta = s3_storage.upload_document(
+            filename=file.filename,
+            content=content,
+            content_type=file.content_type,
+            project_id=project_id,
+            feature_id=feature_id,
+        )
+        meta["project_id"] = project_id
+        meta["feature_id"] = feature_id
+        doc_id = store.save_stored_document(meta)
+        meta["id"] = doc_id
+        try:
+            meta["presigned_url"] = s3_storage.generate_presigned_url(meta["s3_key"])
+        except Exception:
+            meta["presigned_url"] = None
+        return meta
+    except Exception as e:
+        print(f"[wardenIQ][s3-upload-error] {e!r}", flush=True)
+        raise HTTPException(500, detail=f"Failed to upload document to AWS S3: {e}")
+
+
+@app.get("/api/documents")
+def list_documents_endpoint(project_id: str = "", feature_id: str = ""):
+    from s3_storage import s3_storage
+    docs = store.list_stored_documents(project_id=project_id or None, feature_id=feature_id or None)
+    is_s3 = s3_storage.is_configured()
+    for d in docs:
+        if is_s3 and d.get("s3_key"):
+            try:
+                d["presigned_url"] = s3_storage.generate_presigned_url(d["s3_key"])
+            except Exception:
+                d["presigned_url"] = None
+    return {"documents": docs, "s3_enabled": is_s3}
+
+
+@app.get("/api/documents/{doc_id}")
+def get_document_endpoint(doc_id: str):
+    from s3_storage import s3_storage
+    doc = store.get_stored_document(doc_id)
+    if not doc:
+        raise HTTPException(404, detail="Document not found")
+    if s3_storage.is_configured() and doc.get("s3_key"):
+        try:
+            doc["presigned_url"] = s3_storage.generate_presigned_url(doc["s3_key"])
+        except Exception:
+            doc["presigned_url"] = None
+    return doc
+
+
+@app.get("/api/documents/{doc_id}/download")
+def download_document_endpoint(doc_id: str):
+    from s3_storage import s3_storage
+    doc = store.get_stored_document(doc_id)
+    if not doc or not doc.get("s3_key"):
+        raise HTTPException(404, detail="Document file not found")
+    try:
+        content = s3_storage.download_document(doc["s3_key"], bucket=doc.get("s3_bucket"))
+        filename = doc.get("filename", "document")
+        content_type = doc.get("content_type", "application/octet-stream")
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        print(f"[wardenIQ][s3-download-error] {e!r}", flush=True)
+        raise HTTPException(500, detail=f"Failed to download document from AWS S3: {e}")
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document_endpoint(doc_id: str):
+    from s3_storage import s3_storage
+    doc = store.get_stored_document(doc_id)
+    if not doc:
+        raise HTTPException(404, detail="Document not found")
+    if doc.get("s3_key"):
+        s3_storage.delete_document(doc["s3_key"], bucket=doc.get("s3_bucket"))
+    deleted = store.delete_stored_document(doc_id)
+    return {"ok": deleted, "id": doc_id}
 
 
 def _svc_error(prefix, e, code=500):

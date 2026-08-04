@@ -44,9 +44,39 @@ export const LEGACY_SHELL_HTML = `
     <div id="login-password" hidden>
       <label>Username / Email</label>
       <input id="login-username" type="text" placeholder="admin" autocomplete="username"/>
-      <label style="margin-top:10px">Password</label>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+        <label style="margin:0">Password</label>
+        <button class="link" id="login-forgot-btn" type="button" style="font-size:12px;padding:0">Forgot password?</button>
+      </div>
       <input id="login-pw" type="password" placeholder="••••••••" autocomplete="current-password"/>
       <button class="go" id="login-signin" style="margin-top:15px">Sign in</button>
+    </div>
+    <div id="login-forgot-nosmtp" hidden>
+      <div class="muted" style="font-size:12px;margin-bottom:10px;text-align:left">
+        <b>SMTP is not configured.</b> Reset your password by providing your deployment's <code>APP_SECRET</code>.
+      </div>
+      <label>Username</label>
+      <input id="reset-master-username" type="text" placeholder="admin"/>
+      <label style="margin-top:10px">App Master Secret (APP_SECRET)</label>
+      <input id="reset-master-secret" type="password" placeholder="Container APP_SECRET"/>
+      <label style="margin-top:10px">New Password</label>
+      <input id="reset-master-new-pw" type="password" placeholder="••••••••"/>
+      <button class="go" id="reset-master-submit-btn" style="margin-top:15px">Reset Password</button>
+      <button class="link" id="reset-nosmtp-back-btn" type="button" style="margin-top:10px">← Back to Sign in</button>
+    </div>
+    <div id="login-forgot-step1" hidden>
+      <label>Username / Email</label>
+      <input id="reset-target" type="text" placeholder="you@company.com"/>
+      <button class="go" id="reset-request-btn" style="margin-top:15px">Email Reset Code</button>
+      <button class="link" id="reset-back-btn" type="button" style="margin-top:10px">← Back to Sign in</button>
+    </div>
+    <div id="login-forgot-step2" hidden>
+      <label>6-digit Reset Code</label>
+      <input id="reset-code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" style="text-align:center;letter-spacing:0.3em;font-size:18px"/>
+      <label style="margin-top:10px">New Password</label>
+      <input id="reset-new-pw" type="password" placeholder="••••••••"/>
+      <button class="go" id="reset-submit-btn" style="margin-top:15px">Set New Password</button>
+      <button class="link" id="reset-cancel-btn" type="button" style="margin-top:10px">← Cancel &amp; Sign in</button>
     </div>
     <div class="muted ok" id="login-msg" style="margin-top:10px"></div>
     <div class="err" id="login-err"></div>
@@ -463,6 +493,31 @@ export const LEGACY_SHELL_HTML = `
           <div class="muted" id="mm-status" style="margin-top:8px"></div>
         </div>
         <div id="mm-diag"></div>
+
+        <div class="card mm-graph-card" id="mm-graph-card">
+          <div class="mm-graph-head">
+            <div>
+              <h3 style="margin:0;font-size:14px">Implementation coverage</h3>
+              <div class="sub" style="margin:2px 0 0">For every test case, an external-reviewer pass judges whether the production code visibly implements that behaviour — and cites the file that proves it. Click any branch to expand it.</div>
+            </div>
+          </div>
+          <div class="mm-summary" id="mm-summary"></div>
+          <div class="mm-stage-wrap">
+            <div class="mm-stage-bar">
+              <div class="mm-legend" id="mm-legend"></div>
+              <div class="mm-stage-tools">
+                <span class="mm-crumb" id="mm-crumb"></span>
+                <button type="button" class="ghost mm-tool" id="mm-zoom-out" title="Zoom out">−</button>
+                <button type="button" class="ghost mm-tool" id="mm-zoom-in" title="Zoom in">+</button>
+                <button type="button" class="ghost mm-tool" id="mm-reset" title="Reset the map">Reset</button>
+              </div>
+            </div>
+            <div id="mm-graph" class="mm-stage"></div>
+          </div>
+          <div id="mm-detail" class="mm-detail"></div>
+          <div class="mm-graph-tip" id="mm-graph-tip" hidden></div>
+        </div>
+
         <div id="mm-map"></div>
         </div>
       </section>
@@ -716,8 +771,34 @@ export const LEGACY_SHELL_HTML = `
             </div>
           </div>
 
+          <div class="card cfg-card cfg-card-wide">
+            <div class="cfg-head"><div class="cfg-head-left"><span class="cfg-step">6</span><h2>AWS S3 Document Storage</h2></div><span class="cfg-badge opt">Optional</span></div>
+            <div class="sub">Persist uploaded requirement documents (PDFs, DOCX, CSVs, etc.) directly into an Amazon S3 Bucket in AWS. Leave credentials blank to use standard AWS environment variables or instance IAM roles.</div>
+            <div class="cfg-row">
+              <div class="cfg-field" style="flex:2"><label>S3 Bucket Name <span class="fi" tabindex="0" data-tip="The target Amazon S3 bucket name (e.g. my-wardeniq-docs-bucket).">i</span></label><input id="cfg-s3-bucket" placeholder="my-wardeniq-docs-bucket"/></div>
+              <div class="cfg-field" style="flex:1"><label>AWS Region <span class="fi" tabindex="0" data-tip="The AWS region where your bucket resides (e.g. us-east-1, us-west-2, eu-west-1).">i</span></label><input id="cfg-s3-region" placeholder="us-east-1"/></div>
+            </div>
+            <div class="cfg-row">
+              <div class="cfg-field"><label>AWS Access Key ID <span class="fi" tabindex="0" data-tip="Optional. Required if not using IAM roles or environment variables.">i</span></label><input id="cfg-s3-key" placeholder="AKIA... (optional)"/></div>
+              <div class="cfg-field"><label>AWS Secret Access Key <span class="fi" tabindex="0" data-tip="Stored encrypted. Leave blank to keep current secret key or use IAM role.">i</span></label><input type="password" id="cfg-s3-secret" placeholder="Secret Access Key (optional)"/></div>
+            </div>
+            <div class="cfg-row">
+              <div class="cfg-field" style="flex:2"><label>Storage Prefix (Subfolder) <span class="fi" tabindex="0" data-tip="Prefix folder within the S3 bucket. Defaults to 'documents'.">i</span></label><input id="cfg-s3-prefix" placeholder="documents"/></div>
+              <div class="cfg-field" style="flex:0 0 auto;align-self:flex-end">
+                <div style="display:flex;gap:14px;align-items:center;padding:8px 0">
+                  <label style="display:flex;gap:5px;align-items:center;font-size:12px;margin:0;color:var(--muted)"><input type="checkbox" id="cfg-s3-enabled" style="width:auto"/> Enable S3 Storage</label>
+                </div>
+              </div>
+            </div>
+            <div class="cfg-status muted" id="cfg-s3-status"></div>
+            <div class="cfg-actions">
+              <button class="go" id="cfg-s3-save">Save S3 Settings</button>
+              <button class="ghost" id="cfg-s3-test">Test S3 Connection</button>
+            </div>
+          </div>
+
           <div class="card cfg-card">
-            <div class="cfg-head"><div class="cfg-head-left"><span class="cfg-step">6</span><h2>Database</h2></div><span class="cfg-badge glob">Global</span></div>
+            <div class="cfg-head"><div class="cfg-head-left"><span class="cfg-step">7</span><h2>Database</h2></div><span class="cfg-badge glob">Global</span></div>
             <div class="sub">Connect wardenIQ to a search-capable MongoDB (Atlas, or self-managed with mongot). Enter the connection string below. It is saved to <code>.env</code> and never shown again.</div>
             <div id="cfg-db-body" class="db-panel"><span class="muted">Loading database status…</span></div>
             <div id="cfg-db-switch" style="margin-top:16px;border-top:1px solid rgba(255,255,255,.06);padding-top:14px;display:none">
@@ -736,7 +817,7 @@ export const LEGACY_SHELL_HTML = `
           </div>
 
           <div class="card cfg-card">
-            <div class="cfg-head"><div class="cfg-head-left"><span class="cfg-step">7</span><h2>Sync &amp; polling</h2></div><span class="cfg-badge glob">Global</span></div>
+            <div class="cfg-head"><div class="cfg-head-left"><span class="cfg-step">8</span><h2>Sync &amp; polling</h2></div><span class="cfg-badge glob">Global</span></div>
             <div class="sub">How often wardenIQ polls your watched GitHub repositories for new commits &amp; pull requests. GitLab is webhook-driven and unaffected. Applies on the next poll — no restart needed — and is also written to <code>.env</code> (<code>POLL_INTERVAL_SECONDS</code>) so the config file stays in sync.</div>
             <div class="cfg-field" style="max-width:320px">
               <label>Poll interval (seconds) <span class="fi" tabindex="0" data-tip="Seconds between GitHub polls of watched repos. Lower = fresher but more API calls; higher = fewer calls. Minimum 30s. Common values: 300 (5 min), 1800 (30 min), 3600 (1 hour).">i</span></label>
@@ -745,6 +826,7 @@ export const LEGACY_SHELL_HTML = `
             <div class="cfg-status muted" id="cfg-poll-status"></div>
             <div class="cfg-actions"><button class="go" id="cfg-poll-save">Save</button></div>
           </div>
+
         </div>
       </section>
 

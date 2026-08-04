@@ -105,6 +105,35 @@
   LLM pricing; when new models are added to the dropdown, add their rates here too.
 
 ### Added
+- **The Mind Map is now an interactive coverage MAP that stays legible at enterprise
+  scale.** The old view was expandable feature cards — no structure, no priority. It is
+  now a node map over the same `/api/projects/{pid}/mindmap` payload:
+  **PROJECT → REPOSITORY → FEATURE → STATUS → test cases**, hand-rolled SVG + vanilla JS
+  (no CDN/D3, so it still works air-gapped).
+  - **Two layouts, auto-selected so the map can never crowd.** *Radial* is used for small
+    projects (≤9 features, single repo) and its ring radius is derived from the real node
+    widths — needed circumference ÷ 2π — so boxes are mathematically incapable of
+    overlapping. Anything larger switches to a *tidy tree* whose row for every node comes
+    from its subtree's leaf count, giving a fixed 30px pitch for 22px nodes at any size;
+    the canvas grows and the stage scrolls instead of blurring. A radial map with 40+
+    features would have to shrink text below legibility, which is why the switch exists.
+    An `auto / radial / tree` toggle lets the user override.
+  - **Repositories are a real layer**, not a tooltip footnote: in tree mode features are
+    grouped under the repo they were reviewed against (a feature spanning several repos
+    appears under each), with a column header showing the repo count.
+  - Each feature node carries a wrapped label, version, case count, coverage % and a
+    covered/partial/uncovered bar; edge thickness scales with case count. Clicking a
+    feature expands its cases inline (tree) or re-roots the map on it (radial); clicking a
+    status cluster jumps straight to those cases. Large features cap at 48 drawn cases
+    with a `+N more` node so the canvas can't explode.
+  - Selecting a feature opens the **evidence panel**: each case with the reviewer's
+    rationale and the **source files cited as proof**, filterable by status; cases with no
+    implementing file say so explicitly. With nothing selected the panel ranks **evidence
+    hotspots** — the files cited most often, i.e. the riskiest places to change.
+  Duplicate feature names are numbered ("… (2/3)") since several features previously
+  truncated to the same label. Interim Sankey-flow, feature/file-matrix and ranked-bar
+  views were built during this work and removed: with features that share most of their
+  files those degrade to a single blob, a uniform grid, and a table respectively.
 - **Repo "kind" is now selectable everywhere and includes a dedicated `test`
   badge.** The kind classification (a display badge, independent of the app/test
   `repo_type` that governs webhooks) gained a `test` value and dropped `other` from

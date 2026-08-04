@@ -626,7 +626,15 @@ to another database"** option to copy your data over safely before switching.
 
 ## Troubleshooting
 
-- **I can't sign in / SMTP is not configured.** If email delivery is not yet configured, sign in with username `admin` and the password you set during install (`ADMIN_PASSWORD`). If you didn't set one, the bootstrap default `admin123` applies and you'll be forced to change it on first login. Once logged in, configure SMTP in **Configuration → Email**.
+- **I can't sign in / Forgot my password.**
+  - **Via Web UI (Email or App Master Secret)**: Click **"Forgot password?"** on the sign-in screen.
+    - **If SMTP is configured**: Enter your email address to receive a 6-digit reset code in your inbox.
+    - **If SMTP is NOT configured (Docker image users)**: Enter username (`admin`), your container's **App Master Secret** (`APP_SECRET` from your container environment), and your new password to reset directly in your web browser.
+  - **Via Docker CLI**: Run interactively inside the container:
+    ```bash
+    docker exec -it warden-app python reset_password.py
+    ```
+  - **Via Docker Environment Variable**: Set `RESET_ADMIN_PASSWORD="NewPassword123"` in your container environment to force-reset the password on container startup.
 - **I'm the only admin and "Disable" doesn't show up on my own account.** That's by
   design — the sole active admin can't disable themselves (see
   [Signing in](#signing-in-the-very-first-time)). Use "Add admin to unlock" to invite
