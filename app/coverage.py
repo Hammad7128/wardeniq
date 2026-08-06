@@ -5,6 +5,7 @@ something deterministic before it is trusted: a cited file must be one we actual
 put in front of the model, and identifiers named in a rationale must really appear
 in that file. The LLM proposes; the index disposes. See `_ground_verdict`.
 """
+import hashlib
 import json
 import os
 import re
@@ -76,6 +77,107 @@ TEST_FILE_RE = re.compile(
 
 def is_test_file(path: str) -> bool:
     return bool(TEST_FILE_RE.search(path or ""))
+
+
+# ---------------------------------------------------------------------------
+# Files that cannot IMPLEMENT a requirement.
+#
+# This is deliberately a SEPARATE predicate from is_test_file() rather than a widening of
+# it. is_test_file()'s current meaning is load-bearing elsewhere: PR coverage uses it to
+# find developer-authored tests and automation coverage counts them, so relabelling type
+# declarations and seed data as "tests" would silently corrupt the automation percentage.
+# Two different questions, two predicates:
+#     is_test_file(p)                -> "is this a test?"        (semantics unchanged)
+#     is_non_implementation_file(p)  -> "could this implement anything at all?"
+#
+# The argument is correctness before cost. A `.d.ts` declaration compiles to nothing and a
+# generated migration asserts no behaviour, so neither can ever be evidence that a
+# requirement is implemented — yet either can be cited, and was. Budget is a side benefit:
+# measured on a real 100-file review corpus, 13 files could not implement anything,
+# `prisma/seed.ts` alone at 42,704 bytes, for roughly 6-7% of the code budget. That is a
+# real saving but not the point; do not let it justify widening these rules.
+#
+# Conservative by construction: anything ambiguous stays IN. Dropping a file is invisible
+# and unrecoverable (it can no longer be cited, so a real implementation reads as
+# uncovered); keeping one merely costs excerpt budget. Every rule below must be a
+# construct that CANNOT carry behaviour, not merely one that usually doesn't.
+#
+# The tool-config branch is an allowlist of NAMED build tools, not a `*.config.ts` glob.
+# The glob was written first and measured second, and measurement killed it: it dropped
+# `src/config/firebase.config.ts`, which throws when credentials are missing and exports
+# the `messaging` client, and `src/config/queue.config.ts`, which holds the job retry count
+# and backoff policy — both things a test case would legitimately be judged against. A
+# file named after a build tool cannot carry application behaviour; a file merely named
+# `*.config.ts` very much can. Add tools here as needed; never widen it back to a glob.
+_TOOL_CONFIG = (
+    "vite|vitest|jest|webpack|rollup|babel|tailwind|postcss|next|nuxt|svelte|astro|"
+    "eslint|prettier|karma|cypress|playwright|tsup|esbuild|metro|nodemon|commitlint|"
+    "lint-staged|drizzle|prisma|knexfile|gatsby|remix|craco|jasmine|stylelint|jsdoc"
+)
+NON_IMPL_PATH_RE = re.compile(
+    r"\.d\.ts$|"                                          # ambient type declarations
+    r"\.pyi$|"                                            # python type stubs
+    r"(^|/)(" + _TOOL_CONFIG + r")\.config\.[cm]?[jt]sx?$|"   # build-tool config only
+    r"(^|/)(seed|seeds)\.(ts|js|mjs|cjs|py|rb)$|"         # DB seed scripts
+    r"(^|/)(seeds|fixtures|migrations|__mocks__)/|"        # seed/fixture/migration trees
+    r"\.sql$|"                                            # raw migrations & dumps
+    r"\.(snap|lock)$",                                    # snapshots, lockfiles
+    re.IGNORECASE,
+)
+
+# Content rule, used only when the file's text is available.
+#
+# It exists because the path rule cannot safely catch `src/types/activity.types.ts`: a
+# blanket `types/` exclusion is exactly the kind of guess that drops real code, since
+# plenty of projects keep runtime helpers there. Asking the file itself is both safer and
+# stricter — a file consisting only of `interface`/`type` declarations compiles to zero
+# JavaScript, so whatever it says, it implements nothing.
+#
+# Order matters: a VALUE construct anywhere wins and the file is kept. `export const
+# MAX_DURATION_MINUTES = 480` and `export const env = {...}` are runtime values a
+# rationale may legitimately cite, so `constants/` and `config/` survive this rule — which
+# is why there is no path rule for those directories either.
+_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/|^[ \t]*#[^\n]*",
+                         re.DOTALL | re.MULTILINE)
+_VALUE_CONSTRUCT_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b|"
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\b|"
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+|"
+    r"^\s*(?:export\s+)?enum\s+|"
+    r"^\s*(?:async\s+)?def\s+|"
+    r"=>|\breturn\b|\bawait\b|\bthrow\b|\bnew\s+[A-Z]",
+    re.MULTILINE,
+)
+_TYPE_ONLY_DECL_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:declare\s+)?(?:interface|type)\s+\w+",
+    re.MULTILINE,
+)
+
+
+def _is_declaration_only(text: str) -> bool:
+    """True only when the file's text is provably type declarations and nothing else.
+
+    Three-way by construction, collapsed to a conservative bool: a value construct means
+    'keeps behaviour' (False); type declarations with no value construct means 'compiles to
+    nothing' (True); anything else — an empty file, a bare re-export barrel, a language
+    this rule does not model — is unknown and therefore kept (False).
+    """
+    body = _COMMENT_RE.sub("", text or "")
+    if _VALUE_CONSTRUCT_RE.search(body):
+        return False
+    return bool(_TYPE_ONLY_DECL_RE.search(body))
+
+
+def is_non_implementation_file(path: str, text: str | None = None) -> bool:
+    """Could this file implement a requirement? Answers the negative: True = it cannot.
+
+    Superset of is_test_file(). Pass `text` when it is on hand to enable the content rule;
+    with path alone the answer is still sound, just less complete.
+    """
+    p = path or ""
+    if is_test_file(p) or NON_IMPL_PATH_RE.search(p):
+        return True
+    return _is_declaration_only(text) if text else False
 
 
 _KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
@@ -348,8 +450,15 @@ def _ground_verdict(status: str, rationale: str, raw_files, idx: dict,
         # show that production code implements it. Verifying only provenance certified
         # exactly this false positive in a real run, so the check lives here too rather
         # than relying on the indexer having filtered the corpus.
+        #
+        # The same reasoning covers type declarations, tool config, seed data and
+        # migrations, so this uses the wider predicate: an `interface CreateEventRequest`
+        # in a .types.ts file names the shape of a request beautifully and proves nothing
+        # about whether any code handles one. The text is passed so the content rule
+        # applies — the indexer's path-only pass cannot catch `activity.types.ts`, and
+        # this is the layer that has the file body to hand.
         path = key.split(":", 1)[1] if ":" in key else key
-        if is_test_file(path):
+        if is_non_implementation_file(path, idx.get("canon", {}).get(key)):
             if key not in ineligible:
                 ineligible.append(key)
             continue
@@ -383,8 +492,8 @@ def _ground_verdict(status: str, rationale: str, raw_files, idx: dict,
             # at all, so drop straight to the floor.
             final = _RANK_STATUS[floor_rank]
             conf = min(conf, 0.2)
-            notes.append("cited only test/spec files, which cannot show that production "
-                         "code implements the behaviour")
+            notes.append("cited only files that cannot implement behaviour (test/spec "
+                         "code, type declarations, config or generated data)")
         else:
             # Downgrade one rung rather than discarding it, and say why.
             final = _RANK_STATUS[max(floor_rank, _STATUS_RANK[original] - 1)]
@@ -415,7 +524,7 @@ def _ground_verdict(status: str, rationale: str, raw_files, idx: dict,
         notes.append(f"{len(rejected)} cited path(s) not among the reviewed files")
     if ineligible and verified:
         conf -= 0.10
-        notes.append(f"{len(ineligible)} cited path(s) ignored as test/spec code")
+        notes.append(f"{len(ineligible)} cited path(s) ignored as non-implementation code")
     if verified and all(s == "basename" for s in strengths):
         conf -= 0.10
         notes.append("citation matched only by filename")
@@ -599,7 +708,32 @@ MAX_WINDOWS = int(os.getenv("MINDMAP_MAX_WINDOWS", "0"))
 # alongside a repo's code index so that CHANGING those rules invalidates the index
 # automatically — without it, a cached index keeps serving chunks filtered by whatever
 # rules were in force when it was built, and the operator has to know to force a rebuild.
-INDEX_RULES_FINGERPRINT = "testfilter:" + str(abs(hash(TEST_FILE_RE.pattern)) % (10 ** 12))
+#
+# MUST be stable across PROCESSES, not just within one. This used builtin `hash()`, which
+# CPython salts per interpreter (PEP 456) unless PYTHONHASHSEED is pinned — it isn't
+# anywhere in this repo. The fingerprint therefore changed on every restart, so the stored
+# value never matched, `rules_ok` was always False, and every Mind Map run re-fetched the
+# tarball and re-embedded every chunk. That silently destroyed the incremental-reuse
+# optimisation this check was bolted onto. sha256 of the pattern is content-addressed and
+# identical in every process. Verify with a SUBPROCESS test: an in-process comparison
+# passes trivially even when this is broken.
+#
+# It must cover EVERY rule that decides what gets indexed, not just the test filter. When
+# the non-implementation rules were added, hashing only TEST_FILE_RE would have meant
+# changing them left every cached index valid — still serving chunks filtered by the old
+# rules, with no way for an operator to know. That is the same bug class as the salted
+# `hash()` above, reached from the opposite direction, so the input is assembled from the
+# patterns themselves: add a rule and the fingerprint moves without anyone remembering to
+# bump a version number.
+_INDEX_RULE_PATTERNS = (
+    TEST_FILE_RE.pattern,
+    NON_IMPL_PATH_RE.pattern,
+    _VALUE_CONSTRUCT_RE.pattern,
+    _TYPE_ONLY_DECL_RE.pattern,
+    _COMMENT_RE.pattern,
+)
+INDEX_RULES_FINGERPRINT = "indexrules:" + hashlib.sha256(
+    "\n".join(_INDEX_RULE_PATTERNS).encode("utf-8")).hexdigest()[:16]
 # Output tokens reserved for the reply. ~10 verdicts of JSON needs well under 1k; the
 # old 4000 crowded out the code it was supposed to be judging.
 REVIEW_MAX_TOKENS = int(os.getenv("MINDMAP_REVIEW_MAX_TOKENS", "2000"))

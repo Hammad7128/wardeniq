@@ -5928,6 +5928,7 @@ def _codeanalysis_worker(jid, params):
         raise RuntimeError("no implementation repos selected — test repos are only used for automation coverage")
     mem = []          # in-memory [(repo_full, path, text, embedding)] for cosine retrieval
     total, tests_skipped, errors, per_repo = 0, 0, [], []
+    non_impl_skipped = 0    # dropped as unable to implement anything; NOT tests
     for repo in repos:
         provider = (repo.get("git_provider") or "github").lower()
         ref = (branches.get(repo["id"]) or "").strip() or branch_override \
@@ -5967,11 +5968,22 @@ def _codeanalysis_worker(jid, params):
         store.clear_code_chunks(repo["id"])
         batch = []
         repo_paths, repo_tests, repo_chunks = [], 0, 0
+        repo_non_impl = 0
         for path, text in files:
             # Mind Map judges IMPLEMENTATION coverage only. Test/spec files are
             # excluded — whether an automated test exists is tracked separately.
             if cov.is_test_file(path):
                 tests_skipped += 1; repo_tests += 1
+                continue
+            # Files that cannot implement anything — type declarations, tool config, seed
+            # data, migrations — are dropped on a SEPARATE counter. `tests_skipped` has to
+            # keep meaning "developer-authored tests", because automation coverage reports
+            # that number and lumping `activity.types.ts` in would inflate it.
+            # `text` is passed so the content rule applies: a path rule cannot safely tell
+            # `types/activity.types.ts` (declarations only) from a runtime helper that
+            # happens to live in types/, but the file body can.
+            if cov.is_non_implementation_file(path, text):
+                non_impl_skipped += 1; repo_non_impl += 1
                 continue
             repo_paths.append(path)
             for i, ch in enumerate(grounding.chunk_code_by_function(text, path)):
@@ -5992,21 +6004,33 @@ def _codeanalysis_worker(jid, params):
                          "git_provider": provider,
                          "files_in_repo": stats["total_files"], "code_matched": len(files),
                          "impl_files": len(repo_paths), "test_files": repo_tests,
+                         "non_impl_files": repo_non_impl,
                          "extensions": stats["top_ext"],
                          "impl_sample": repo_paths[:40],
                          "sample": stats["sample"] if not files else []})
         print(f"[wardenIQ][mindmap] {repo['full_name']}@{ref or 'default'}: "
               f"{len(repo_paths)} impl files, {repo_tests} tests skipped, "
+              f"{repo_non_impl} non-implementation skipped, "
               f"{stats['total_files']} total. files={repo_paths[:60]}", flush=True)
         store.update_job(jid, stage=f"indexed {repo['full_name']} — {len(repo_paths)} impl files, "
-                                     f"{repo_tests} tests skipped ({stats['total_files']} total)")
+                                     f"{repo_tests} tests skipped, "
+                                     f"{repo_non_impl} non-implementation skipped "
+                                     f"({stats['total_files']} total)")
     store.merge_job_result(jid, code_chunks=total, tests_skipped=tests_skipped,
+                           non_impl_skipped=non_impl_skipped,
                            repos=[r["full_name"] for r in repos], errors=errors,
                            per_repo=per_repo)
     if not mem:
-        note = ("only test/spec files found — connect the implementation repo(s) to "
-                "measure code coverage" if tests_skipped else
-                "no recognized source files found — see per-repo diagnostics below")
+        if tests_skipped:
+            note = ("only test/spec files found — connect the implementation repo(s) to "
+                    "measure code coverage")
+        elif non_impl_skipped:
+            # Everything matched was type declarations / config / seed data. Saying "no
+            # source files found" here would send someone hunting a extraction bug.
+            note = (f"{non_impl_skipped} file(s) matched but none can implement behaviour "
+                    "(type declarations, tool config, seed data or migrations)")
+        else:
+            note = "no recognized source files found — see per-repo diagnostics below"
         store.merge_job_result(jid, features_mapped=0, note=note)
         return
     feats = store.list_features(project_id)
