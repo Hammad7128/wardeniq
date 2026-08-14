@@ -52,12 +52,15 @@ class TestPricing:
         assert s["cost_usd"] is None
 
     def test_family_fallback_prices_versioned_gemini(self):
-        # "gemini-3.1-flash-lite" hits no exact/substring price but matches the family rule
-        # (("gemini","flash","lite") -> $0.10 / 1M input, current published rate).
-        rec = {"gemini-3.1-flash-lite": {"prompt_tokens": 1_000_000, "completion_tokens": 0,
+        # A not-yet-listed versioned gemini flash-lite id hits no exact/substring price
+        # but matches the family rule (("gemini","flash","lite") -> $0.10 / 1M input).
+        # Deliberately NOT "gemini-3.1-flash-lite" — that id is now an exact DEFAULT_PRICES
+        # entry (it's a real, currently-offered dropdown model), so it would resolve via
+        # the exact-match branch instead of exercising the fallback this test targets.
+        rec = {"gemini-4.0-flash-lite": {"prompt_tokens": 1_000_000, "completion_tokens": 0,
                                          "calls": 1, "kind": "llm"}}
         s = usage.summarize(rec, prices={})
-        assert abs(s["by_model"]["gemini-3.1-flash-lite"]["cost_usd"] - 0.10) < 1e-9
+        assert abs(s["by_model"]["gemini-4.0-flash-lite"]["cost_usd"] - 0.10) < 1e-9
 
     def test_ollama_tag_is_free(self):
         rec = {"qwen2.5:7b": {"prompt_tokens": 999_999, "completion_tokens": 999_999,

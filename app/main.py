@@ -21,6 +21,7 @@ import github
 import gitlab as gitlab_mod
 import coverage as cov
 import grounding
+import contracts
 import automation as auto_cov
 import sheet_import as sheet_mod
 import crypto
@@ -310,6 +311,30 @@ def _repo_get_archive(repo: dict, ref: str = ""):
     if provider == "gitlab":
         return client.get_archive(repo["full_name"], ref)
     return client.get_archive(repo["owner"], repo["name"], ref)
+
+
+def _fetch_repo_snapshot_files(repo: dict, ref: str = "") -> list:
+    """Whole-repo file snapshot for the deterministic cross-file dependency layer
+    (app/contracts.py) — the SAME archive-fetch mechanism `_codeanalysis_worker` (Mind Map)
+    already uses (`_repo_get_archive` + `extractmod.source_files_from_tar`), reused here so
+    PR Code Coverage (`_pr_coverage`) and Code Analysis (`_analyze_worker`) can also see
+    consumers of a changed contract that live OUTSIDE a PR's/commit's own diff — the
+    structural gap `contracts.build_contract_breaks` exists to close (see
+    WARDENIQ_CROSS_FILE_BEFORE_AFTER.md).
+
+    Best-effort and defensive by design: any failure (no PAT configured, network error, rate
+    limit, archive too large) returns `[]` rather than raising, so a fetch problem degrades to
+    the ORIGINAL diff-only behaviour instead of failing the whole coverage/analysis run — the
+    same "evidence, never a hard dependency" posture `contracts.py` itself documents.
+    """
+    try:
+        data = _repo_get_archive(repo, ref or repo.get("default_branch", ""))
+        files, _stats = extractmod.source_files_from_tar(data, return_stats=True)
+        return [{"path": p, "text": t} for p, t in files]
+    except Exception as e:  # noqa: BLE001
+        print(f"[wardenIQ][contracts] repo snapshot fetch failed for "
+              f"{repo.get('full_name')}: {e}", flush=True)
+        return []
 
 
 def _repo_list_branches(repo: dict):
@@ -5871,7 +5896,14 @@ def _analyze_worker(jid, params):
 
     # 1) grounded tiers (no LLM) — exact, evidence-backed
     store.update_job(jid, stage="grounded matching (endpoints + symbols)")
-    gm = grounding.match_commit_changes(commits, cases)
+    # Cross-file dependency evidence (contracts.py): a whole-repo snapshot per analyzed repo,
+    # so a producer/consumer contract break can be found even when the consumer lives outside
+    # any of this window's commits. Best-effort — see _fetch_repo_snapshot_files.
+    repo_files = []
+    for repo in repos:
+        ref = (branches.get(repo["id"]) or "").strip() or repo.get("default_branch", "")
+        repo_files.extend(_fetch_repo_snapshot_files(repo, ref))
+    gm = grounding.match_commit_changes(commits, cases, repo_files=repo_files)
     results = []
     for cid, m in gm["matches"].items():
         c = by_id[cid]
@@ -5929,6 +5961,15 @@ def _codeanalysis_worker(jid, params):
     mem = []          # in-memory [(repo_full, path, text, embedding)] for cosine retrieval
     total, tests_skipped, errors, per_repo = 0, 0, [], []
     non_impl_skipped = 0    # dropped as unable to implement anything; NOT tests
+    # Cross-file dependency evidence (contracts.py): whole-file text for every repo in this
+    # job, gathered independently of the incremental-reuse decision below. On the reuse path
+    # (below) `mem` is populated from stored function CHUNKS, not whole-file text, so a
+    # producer/consumer contract broken entirely outside any indexed chunk boundary would be
+    # invisible to `contracts.find_orphaned_contract_reads` if it only saw `mem` — a second,
+    # best-effort snapshot fetch (`_fetch_repo_snapshot_files`) closes that gap for reused
+    # repos. On the fresh-fetch path (below) the whole-file text is already in hand from
+    # `extractmod.source_files_from_tar`, so it is reused directly with no second fetch.
+    all_repo_files = []
     for repo in repos:
         provider = (repo.get("git_provider") or "github").lower()
         ref = (branches.get(repo["id"]) or "").strip() or branch_override \
@@ -5956,6 +5997,10 @@ def _codeanalysis_worker(jid, params):
                              "impl_files": len(paths), "reused": True, "git_provider": provider})
             print(f"[wardenIQ][mindmap] {repo['full_name']}@{ref}: reused index "
                   f"({len(paths)} impl files, head {head[:7]})", flush=True)
+            # `mem` above only has stored function chunks for a reused repo, not whole-file
+            # text — fetch a best-effort whole-repo snapshot separately so contract-break
+            # detection sees full file contents even when this repo's index was reused as-is.
+            all_repo_files.extend(_fetch_repo_snapshot_files(repo, ref))
             continue
         store.update_job(jid, stage=f"fetching {provider} code — {repo['full_name']}@{ref or 'default'}")
         try:
@@ -5965,6 +6010,9 @@ def _codeanalysis_worker(jid, params):
             per_repo.append({"repo": repo["full_name"], "branch": ref, "error": str(e)[:200]})
             continue
         files, stats = extractmod.source_files_from_tar(data, return_stats=True)
+        # Whole-file text is already in hand from this fetch — reuse it directly for
+        # contract-break detection instead of issuing a second archive fetch.
+        all_repo_files.extend({"path": p, "text": t} for p, t in files)
         store.clear_code_chunks(repo["id"])
         batch = []
         repo_paths, repo_tests, repo_chunks = [], 0, 0
@@ -6037,6 +6085,14 @@ def _codeanalysis_worker(jid, params):
     lm = current_llm()
     repo_names = [r["full_name"] for r in repos]
     mapped = 0
+    # Cross-file dependency evidence (contracts.py), computed ONCE over every repo in this
+    # job — snapshot-only (no diff, no PR to anchor to), so this is the orphaned-read
+    # detector rather than the diff-based break detector: does any `.get(KEY, ...)` read
+    # anywhere in the indexed repos reference a key that no code in those same repos ever
+    # writes? Best-effort: an empty `all_repo_files` (every fetch failed) degrades to `[]`,
+    # which review_code_coverage treats identically to "nothing to report" — never a hard
+    # dependency for Mind Map's review to proceed.
+    contract_findings = contracts.find_orphaned_contract_reads(all_repo_files) if all_repo_files else []
 
     def likely_impl_path(path: str) -> bool:
         p = (path or "").lower()
@@ -6134,7 +6190,8 @@ def _codeanalysis_worker(jid, params):
         # this the stale-job sweeper marks a perfectly healthy run "worker heartbeat lost".
         res = cov.review_code_coverage(lm, f["name"], full.get("text", ""), cases, excerpts,
                                        samples=MINDMAP_SAMPLES,
-                                       progress=lambda m: store.update_job(jid, stage=m))
+                                       progress=lambda m: store.update_job(jid, stage=m),
+                                       contract_findings=contract_findings)
         res["reviewed_files"] = reviewed_files
         store.save_code_coverage(fid, project_id, res, repo_names)
         g = res.get("grounding") or {}
@@ -6774,12 +6831,22 @@ def _pr_coverage(pr_id, pr_doc, files, fid):
     prod_files = [f for f in files if f["filename"] in prod_set]
     pseudo = [{"repo": pr_doc.get("repo_full_name"), "sha": str(pr_doc.get("number")),
                "url": pr_doc.get("url"), "message": pr_doc.get("title", ""), "files": prod_files}]
+    # Cross-file dependency evidence (contracts.py): fetch the rest of the repo at the PR's
+    # head branch so a producer/consumer contract break can be found even when the consumer
+    # is a file this PR's own diff never touched. Best-effort — see
+    # _fetch_repo_snapshot_files; a fetch failure (no PAT, network error, etc.) silently
+    # degrades to the original diff-only behaviour rather than failing this PR's coverage run.
+    repo_files = []
+    repo_doc = store.get_repo(pr_doc["repo_id"]) if pr_doc.get("repo_id") else None
+    if repo_doc:
+        repo_files = _fetch_repo_snapshot_files(repo_doc, pr_doc.get("head_ref") or "")
     # Grounding gives SCOPE (which cases the PR touches, with file:line evidence) — NOT a verdict.
-    gm = grounding.match_commit_changes(pseudo, cases)
+    gm = grounding.match_commit_changes(pseudo, cases, repo_files=repo_files)
     # The LLM decides the actual verdict over ALL cases: does the diff IMPLEMENT the behaviour?
     llm_v = {}
     if prod_files:
-        res = cov.verify_pr_implementation(current_llm(), pr_doc, prod_files, cases)
+        res = cov.verify_pr_implementation(current_llm(), pr_doc, prod_files, cases,
+                                           repo_files=repo_files)
         llm_v = {x["test_case_id"]: x for x in res.get("covered", [])}
     by_id = {c["id"]: c for c in cases}
     covered = []

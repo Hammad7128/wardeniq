@@ -58,13 +58,19 @@ DEFAULT_PRICES = {
     "claude-haiku-3-5": {"in": 0.80, "out": 4.00},          # retired — legacy pricing
     "claude-3-5-haiku-latest": {"in": 0.80, "out": 4.00},   # dropdown alias for Haiku 3.5
     # Google Gemini — keyed to the Settings dropdown. Source: ai.google.dev/gemini-api
-    # /docs/pricing (paid tier, standard <=200k), verified 2026-07-22.
-    "gemini-3-pro-preview": {"in": 2.00, "out": 12.00},    # priced as gemini-3.1-pro-preview
-    "gemini-3-flash-preview": {"in": 0.50, "out": 3.00},
+    # /docs/pricing (paid tier, standard <=200k), verified 2026-08-14. The dropdown's
+    # old "gemini-3-pro-preview" / "gemini-3-flash-preview" / "gemini-2.0-flash" ids
+    # did not match any real, callable Gemini model id (there is no bare "Gemini 3" —
+    # the 3-series ships as 3.1/3.5/3.6/3.7 — and 2.0 Flash has since been retired);
+    # replaced with the current real model ids below. Gemini 3.7/3.6 intentionally
+    # excluded from the dropdown for now (3.6 currently ships only a single Flash
+    # variant, not a matched pair, and 3.7 is being held back) — see the Settings UI.
+    "gemini-3.1-pro-preview": {"in": 2.00, "out": 12.00},
+    "gemini-3.5-flash": {"in": 1.50, "out": 9.00},
     "gemini-2.5-pro": {"in": 1.25, "out": 10.00},
     "gemini-2.5-flash": {"in": 0.30, "out": 2.50},
-    "gemini-2.5-flash-lite": {"in": 0.10, "out": 0.40},
-    "gemini-2.0-flash": {"in": 0.10, "out": 0.40},         # deprecated
+    "gemini-3.5-flash-lite": {"in": 0.30, "out": 2.50},
+    "gemini-3.1-flash-lite": {"in": 0.25, "out": 1.50},
     # Mistral — keyed to the Settings dropdown. Source: mistral.ai/pricing/api,
     # verified 2026-07-22 (the "-latest" aliases point to the versions noted).
     "mistral-large-latest": {"in": 0.50, "out": 1.50},     # Mistral Large 3

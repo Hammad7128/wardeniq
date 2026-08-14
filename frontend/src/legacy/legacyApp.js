@@ -2725,12 +2725,12 @@ const PREDEFINED_MODELS = {
     { id: "claude-3-5-haiku-latest", label: "Claude 3.5 Haiku" }
   ],
   gemini: [
-    { id: "gemini-3-pro-preview", label: "Gemini 3 Pro (newest)" },
-    { id: "gemini-3-flash-preview", label: "Gemini 3 Flash (newest)" },
+    { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (newest)" },
+    { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash (newest)" },
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro — best quality" },
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — balanced" },
-    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite — cheapest" },
-    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" }
+    { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite" },
+    { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite — cheapest" }
   ],
   mistral: [
     { id: "mistral-large-latest", label: "Mistral Large — best quality" },

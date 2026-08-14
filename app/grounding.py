@@ -24,6 +24,7 @@ from unidiff import PatchSet
 
 from coverage import is_test_file  # single source of truth for test-file detection
 from extract import CODE_EXT       # recognised source-code extensions
+import contracts                   # producer/consumer contract-change detection (cross-file)
 
 # --------------------------------------------------------------------------- calibration
 MATCH_THRESHOLD = 0.70
@@ -78,6 +79,56 @@ def domain_tokens(case: dict) -> set:
 def signal_tokens(*texts) -> set:
     """Tokens from a piece of evidence (symbol name, endpoint path, file path)."""
     return _tokenize(" ".join(t for t in texts if t))
+
+
+_QUOTED_RX = re.compile(r"""['"]([A-Za-z_][\w-]*)['"]""")
+
+
+def literal_tokens(*texts) -> set:
+    """Tokens from ONLY the quoted string-literal contents of a code snippet — e.g. the
+    `"driver"` in `claims.get("role", "driver")` — deliberately excluding bare code
+    identifiers (variable names, call names) in the same line.
+
+    A snippet's raw vocabulary is not safe to match against test-case wording: a local
+    variable or parameter name like `claims`/`payload`/`request` is structural noise that
+    recurs in nearly every function of a JWT-based codebase and will coincidentally overlap
+    with unrelated case titles (e.g. an unrelated case mentioning "audience claims" matched
+    a consumer snippet purely because that snippet also happens to read a variable named
+    `claims`). A quoted string literal inside the snippet — a role name, status value, header
+    name, etc. — is actual domain content the author chose to write down, so it carries real
+    signal without that risk.
+    """
+    quoted = " ".join(m.group(1) for t in texts if t for m in _QUOTED_RX.finditer(t))
+    return _tokenize(quoted)
+
+
+# A `.get(KEY, DEFAULT)` / `getattr(obj, KEY, DEFAULT)` fallback's DEFAULT argument is a
+# constant the author picked for what to do when the key is ABSENT — it is not itself part of
+# the contract being read, unlike the KEY argument. Treating it as matchable domain content is
+# what let an unrelated case (mentioning e.g. an audience value that happens to share a plain
+# English word with some OTHER read-site's fallback constant, in a completely different
+# function) collide with a contract-break's evidence purely by coincidence — a real false
+# positive found via a real, non-synthetic 41-case suite run (not caught by a smaller/synthetic
+# fixture). General by construction: matches the two-argument-call SHAPE, not any specific key
+# or value — a `.get("anything", "anything")` fallback is masked out the same way regardless of
+# domain, key name, or file.
+_FALLBACK_DEFAULT_RX = [
+    re.compile(r"""(\.get\(\s*['"][\w-]+['"]\s*,\s*)(['"])[\w-]+\2(\s*\))"""),
+    re.compile(r"""(getattr\([^,]+,\s*['"][\w-]+['"]\s*,\s*)(['"])[\w-]+\2(\s*\))"""),
+]
+
+
+def _mask_fallback_default(snippet: str) -> str:
+    """Blank out a `.get`/`getattr` call's DEFAULT-argument literal (replacing `"driver"` with
+    `""`, which `_QUOTED_RX` requires at least one char to match, so it drops out of
+    `literal_tokens` entirely) while leaving the KEY argument and the rest of the line intact —
+    used only as a pre-filter before `literal_tokens()` for contract-break matching, never for
+    the human/LLM-facing evidence citation text itself (the real snippet, defaults included, is
+    still what gets shown as evidence)."""
+    out = snippet or ""
+    for rx in _FALLBACK_DEFAULT_RX:
+        out = rx.sub(lambda m: m.group(1) + m.group(2) + m.group(2) + m.group(3), out)
+    return out
 
 
 def feature_keywords(name: str, requirement: str = "", case_titles=None, limit: int = 24) -> list:
@@ -510,21 +561,71 @@ def _add_evidence(match: dict, ev: dict):
     match["evidence"].append({k: ev.get(k) for k in ("repo", "sha", "url", "file", "line", "signal")})
 
 
-def match_commit_changes(commits: list, cases: list) -> dict:
+def match_contract_breaks_to_cases(contract_breaks: list, cases: list) -> dict:
+    """Match `contracts.build_contract_breaks()` output straight to test cases — the SAME
+    distinctive-token guard used by `match_commit_changes`'s `contract_break` tier below,
+    factored out here so any other caller (e.g. `coverage.py`'s PR-implementation verifier)
+    can apply the identical, already-hardened rule without re-deriving or duplicating it.
+
+    Returns {case_id: [{"break": <contract-break dict>, "consumer": <consumer dict>}, ...]}
+    for every case whose title/steps share a token with a break's old/new key names or a
+    consumer read-site's quoted-literal vocabulary — AND that token is distinctive (not a
+    generic word shared by most of the suite). See `match_commit_changes` for the false-
+    positive history (file-path segments, function names, and bare code identifiers were all
+    tried and rejected as overlap sources for this exact reason).
+    """
+    if not contract_breaks or not cases:
+        return {}
+    case_toks = {c["id"]: domain_tokens(c) for c in cases}
+    df: dict = {}
+    for toks in case_toks.values():
+        for t in toks:
+            df[t] = df.get(t, 0) + 1
+    n_cases = max(1, len(cases))
+    generic_cutoff = max(2, n_cases // 3)
+
+    def _distinctive(tok):
+        return n_cases < 6 or df.get(tok, 0) <= generic_cutoff
+
+    out: dict = {}
+    for b in contract_breaks:
+        key_toks = signal_tokens(b.get("old_key") or "", b.get("new_key") or "")
+        for con in b.get("consumers") or []:
+            toks = key_toks | literal_tokens(_mask_fallback_default(con.get("snippet") or ""))
+            if not toks:
+                continue
+            for cid, ctoks in case_toks.items():
+                overlap = ctoks & toks
+                if overlap and any(_distinctive(t) for t in overlap):
+                    out.setdefault(cid, []).append({"break": b, "consumer": con})
+    return out
+
+
+def match_commit_changes(commits: list, cases: list, repo_files: list | None = None) -> dict:
     """Grounded, evidence-bearing match of commit changes to test cases (NO LLM).
 
-    Tiers (highest confidence wins): endpoint-exact (1, .95) > endpoint-path (2, .90) >
-    symbol-overlap-with-domain-guard (3, .75). Every match cites the exact commit/file/line.
+    Tiers (highest confidence wins): contract-break (0, .92) > endpoint-exact (1, .95) >
+    endpoint-path (2, .90) > symbol-overlap-with-domain-guard (3, .75) > function-changed-
+    with-callers (4, .65). Every match cites the exact commit/file/line.
 
-    `commits`: [{repo, sha, message, files:[{filename,status,patch,...}]}]
-    `cases`:   [{id, title, type, steps}]
+    `commits`:    [{repo, sha, message, files:[{filename,status,patch,...}]}]
+    `cases`:      [{id, title, type, steps}]
+    `repo_files`: optional [{"path","text"}, ...] — the CURRENT full text of the rest of the
+        repo (files the commits/PR did NOT touch). When supplied, this also runs
+        `contracts.build_contract_breaks` per commit to find producer/consumer contract
+        changes (dict/object key renames, function-body changes) whose CONSUMERS live in
+        files none of these commits touched — the cross-file dependency case a diff-only
+        analysis can never see (see contracts.py's module docstring for the full rationale,
+        written against the Authentication-pilot AUTH-007 finding). Omitting it (the
+        default) reproduces the exact prior behaviour, so existing callers are unaffected.
     Returns {"matches": {case_id: {...}}, "matched_ids": set}.
     """
     # 1) pull grounded signals out of every (non-test) changed file, tagged with commit context
-    endpoints, symbols = [], []
+    endpoints, symbols, contract_evidence, function_change_evidence = [], [], [], []
     for c in commits:
         repo, sha, url = c.get("repo"), c.get("sha"), c.get("url")
-        for f in c.get("files", []) or []:
+        files = c.get("files", []) or []
+        for f in files:
             path, patch = f.get("filename", ""), f.get("patch", "")
             if not path or is_test_file(path):   # test files are never primary evidence
                 continue
@@ -532,6 +633,26 @@ def match_commit_changes(commits: list, cases: list) -> dict:
                 endpoints.append({**ep, "repo": repo, "sha": sha, "url": url})
             for sy in extract_symbols(patch, path):
                 symbols.append({**sy, "repo": repo, "sha": sha, "url": url})
+        if repo_files:
+            deps = contracts.build_contract_breaks(files, repo_files)
+            for b in deps["contract_breaks"]:
+                for con in b["consumers"]:
+                    contract_evidence.append({
+                        "repo": repo, "sha": sha, "url": url,
+                        "file": con["file"], "line": con["line"],
+                        "signal": f"{b['old_key']}" + (f"->{b['new_key']}" if b["new_key"] else ""),
+                        "producer_file": b["producer_file"], "producer_function": b["producer_function"],
+                        "old_key": b["old_key"], "new_key": b["new_key"], "reason": b["reason"],
+                        "consumer_function": con.get("function"), "snippet": con.get("snippet"),
+                    })
+            for fc in deps["function_changes"]:
+                for con in fc["consumers"]:
+                    function_change_evidence.append({
+                        "repo": repo, "sha": sha, "url": url,
+                        "file": con["file"], "line": con["line"], "signal": fc["producer_function"],
+                        "producer_file": fc["producer_file"], "reason": fc["reason"],
+                        "consumer_function": con.get("function"), "snippet": con.get("snippet"),
+                    })
 
     # Document frequency of domain tokens across the whole suite. A token shared by
     # a large fraction of cases (e.g. "auth"/"token"/"session" in a login feature)
@@ -557,6 +678,52 @@ def match_commit_changes(commits: list, cases: list) -> dict:
         ceps = case_endpoints(case)
         ctoks = case_toks[cid]
         best = None
+
+        # contract-break tier — HIGHEST priority: a producer/consumer contract change with a
+        # real, grounded consumer citation outside the diff is the most specific, most
+        # dangerous signal this function can produce (see contracts.py). Guarded the same way
+        # as the symbol tier: the changed key AND the consumer's own read-site snippet must
+        # share a DISTINCTIVE domain token with the case.
+        #
+        # Deliberately excludes TWO categories of token that produced real false positives in
+        # testing at the benchmark's actual 41-case scale:
+        #   (1) file-path segments — a repo's directory scaffolding (`services`, `service`,
+        #       `auth_service`) is shared by nearly every file in an auth-heavy codebase (an
+        #       unrelated Payment case matched purely because both its title and the path
+        #       `services/auth_service/refresh.py` contain the generic word "service").
+        #   (2) the producer/consumer FUNCTION NAME — a function can be named after a common
+        #       domain verb (e.g. `refresh()`) that legitimately appears in many OTHER case
+        #       titles for the same feature ("refresh token", "rotate", "replay") without those
+        #       cases having anything to do with THIS specific key rename. 14 of 41 real cases
+        #       false-matched this way before the function name was excluded here.
+        #   (3) bare code IDENTIFIERS inside the consumer's read-site snippet (variable names,
+        #       call names — e.g. `claims` in `claims.get("role")`) — these are structural
+        #       vocabulary shared by nearly every function in a JWT-based codebase, not
+        #       domain content. A completely unrelated case about token *audience* claims
+        #       matched here purely because its title says "claims" and so does the snippet's
+        #       local variable name. Only the snippet's QUOTED STRING LITERALS (via
+        #       `literal_tokens`, not `signal_tokens`) are used instead — e.g. the `"driver"`
+        #       default value in `.get("role", "driver")` — since that's domain content the
+        #       author actually chose to write down, not incidental code structure.
+        # What's left — the literal old/new key names and the read-site's own quoted-literal
+        # vocabulary — is what's actually specific to THIS contract. Note the read-site's
+        # DEFAULT/fallback-argument literal (e.g. the `"driver"` in `.get("role", "driver")`) is
+        # explicitly masked out before this (see `_mask_fallback_default`): a real 41-case run
+        # showed an unrelated case matching purely because it happened to share an unrelated
+        # English word with some OTHER read-site's fallback constant — the fallback value is not
+        # part of the contract being read, only the KEY name is. TAB-AUT-19/30 are unaffected
+        # since both already share the literal KEY name ("role") with the case text directly.
+        for ev in contract_evidence:
+            overlap = ctoks & (signal_tokens(ev.get("old_key") or "", ev.get("new_key") or "")
+                                | literal_tokens(_mask_fallback_default(ev.get("snippet") or "")))
+            if not overlap or not any(_distinctive(t) for t in overlap):
+                continue
+            if best is None or 0 < best["tier"]:
+                best = {"tier": 0, "confidence": 0.92, "signal": ev["signal"],
+                        "signal_type": "contract_break", "risk": "high",
+                        "evidence": [], "_seen": set(), "reason_override": ev["reason"]}
+            _add_evidence(best, {"repo": ev["repo"], "sha": ev["sha"], "url": ev.get("url"),
+                                 "file": ev["file"], "line": ev["line"], "signal": ev["signal"]})
 
         # endpoint tiers
         for ev in endpoints:
@@ -597,12 +764,33 @@ def match_commit_changes(commits: list, cases: list) -> dict:
                                      "url": ev.get("url"), "file": ev["file"],
                                      "line": ev["line"], "signal": ev["name"]})
 
+        # function-changed-with-callers tier — lowest-priority grounded tier: the producer
+        # function's BODY changed at all (no key-level contract change detected), and it is
+        # still called from files this change didn't touch. Coarser and lower-confidence than
+        # a confirmed contract-break, but still real, still cited evidence — the general
+        # "shared utility behaviour changed" signal from contracts.py.
+        if best is None:
+            for ev in function_change_evidence:
+                # Same rationale as the contract_break tier above: only the snippet's quoted
+                # string literals are used, not its bare code identifiers, to avoid matching
+                # on a coincidentally-English local variable name (e.g. `claims`, `payload`).
+                overlap = ctoks & (signal_tokens(ev["signal"], ev.get("consumer_function") or "")
+                                    | literal_tokens(ev.get("snippet") or ""))
+                if not overlap or not any(_distinctive(t) for t in overlap):
+                    continue
+                if best is None:
+                    best = {"tier": 4, "confidence": 0.65, "signal": ev["signal"],
+                            "signal_type": "function_change", "risk": "medium",
+                            "evidence": [], "_seen": set(), "reason_override": ev["reason"]}
+                _add_evidence(best, {"repo": ev["repo"], "sha": ev["sha"], "url": ev.get("url"),
+                                     "file": ev["file"], "line": ev["line"], "signal": ev["signal"]})
+
         if best:
             best.pop("_seen", None)
             best["status"] = calibrate(best["confidence"])
             n = len(best["evidence"])
             where = best["evidence"][0] if n else {}
-            best["reason"] = (
+            best["reason"] = best.pop("reason_override", None) or (
                 f"{best['signal_type']} `{best['signal']}` changed in "
                 f"{where.get('file', '?')}:{where.get('line', '?')}"
                 + (f" (+{n - 1} more)" if n > 1 else ""))
@@ -611,15 +799,20 @@ def match_commit_changes(commits: list, cases: list) -> dict:
     # 3) fan-out cap: a changed symbol that "matches" a large share of the suite is a
     # shared utility, not a precise per-case impact. Drop those symbol matches so they
     # fall through to the LLM semantic tier instead of flooding results as false
-    # positives. Endpoints are exempt — they're precise by construction.
+    # positives. Endpoints are exempt — they're precise by construction. `contract_break`
+    # is likewise exempt: it already requires an exact literal key match PLUS a real,
+    # cited consumer read, which is precise by construction the same way an endpoint is —
+    # capping it would suppress the exact cross-file signal this tier exists to surface.
+    # `function_change` (the coarser, no-key-involved companion signal) is NOT exempt: a
+    # widely-called helper touching many files is exactly the noisy case this cap targets.
     fanout_cap = max(6, n_cases // 6)
-    sym_spread = {}
+    spread = {}
     for m in matches.values():
-        if m["signal_type"] == "symbol":
-            sym_spread[m["signal"]] = sym_spread.get(m["signal"], 0) + 1
-    noisy = {sig for sig, k in sym_spread.items() if k > fanout_cap}
+        if m["signal_type"] in ("symbol", "function_change"):
+            spread[(m["signal_type"], m["signal"])] = spread.get((m["signal_type"], m["signal"]), 0) + 1
+    noisy = {sig for sig, k in spread.items() if k > fanout_cap}
     if noisy:
         matches = {cid: m for cid, m in matches.items()
-                   if not (m["signal_type"] == "symbol" and m["signal"] in noisy)}
+                   if (m["signal_type"], m["signal"]) not in noisy}
 
     return {"matches": matches, "matched_ids": set(matches.keys())}

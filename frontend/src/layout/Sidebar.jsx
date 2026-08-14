@@ -32,25 +32,33 @@ const NAV_ITEMS = [
     label: "Test Cases",
     icon: (
       <>
-        <path d="M9 11l3 3L22 4" />
-        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        <rect x="8" y="2" width="8" height="4" rx="1" />
+        <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+        <path d="m9 14 2 2 4-4" />
       </>
     ),
   },
   {
     to: "/cycles",
     label: "Code Analysis & Cycles",
-    icon: <path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-7 3.5M3 4v4h4" />,
+    icon: (
+      <>
+        <path d="m9 9-2 2 2 2" />
+        <path d="m13 13 2-2-2-2" />
+        <circle cx="11" cy="11" r="8" />
+        <path d="m21 21-4.3-4.3" />
+      </>
+    ),
   },
   {
     to: "/mindmap",
     label: "Mind Map",
     icon: (
       <>
-        <circle cx="6" cy="12" r="2.5" />
-        <circle cx="18" cy="6" r="2.5" />
-        <circle cx="18" cy="18" r="2.5" />
-        <path d="M8.2 10.9l7.6-3.8M8.2 13.1l7.6 3.8" />
+        <circle cx="12" cy="5" r="2" />
+        <circle cx="6" cy="19" r="2" />
+        <circle cx="18" cy="19" r="2" />
+        <path d="M12 7v4M12 11l-6 6M12 11l6 6" />
       </>
     ),
   },

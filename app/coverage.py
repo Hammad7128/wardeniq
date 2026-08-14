@@ -800,10 +800,11 @@ def _code_excerpt_block(code_excerpts, max_total=None, max_per=None) -> str:
     return "\n\n".join(parts)
 
 
-def _codereview_prompt(feature_name, requirement, code, briefs) -> str:
+def _codereview_prompt(feature_name, requirement, code, briefs, evidence_block="") -> str:
     return (
         f"FEATURE: {feature_name}\n\nREQUIREMENT (truncated):\n{(requirement or '')[:2000]}\n\n"
-        f"RELEVANT PRODUCTION CODE (excerpts; test/spec files excluded):\n{code}\n\n"
+        f"RELEVANT PRODUCTION CODE (excerpts; test/spec files excluded):\n{code}"
+        f"{evidence_block}\n\n"
         f"TEST CASES TO JUDGE ({len(briefs)}):\n{json.dumps(briefs)[:5000]}\n\n"
         "For EACH case, decide from the PRODUCTION code ABOVE only:\n"
         "- 'covered' = the code clearly implements the SPECIFIC behaviour and you can name the exact file/function.\n"
@@ -845,7 +846,7 @@ def _beat(progress, message: str):
 
 
 def review_code_coverage(llm, feature_name, requirement, cases, code_excerpts, batch_size=None,
-                         samples=1, progress=None) -> dict:
+                         samples=1, progress=None, contract_findings=None) -> dict:
     """LLM external-reviewer pass: map actual code to a feature's test cases.
 
     Cases are judged in small BATCHES (so a large feature isn't crammed into one call, which
@@ -865,12 +866,53 @@ def review_code_coverage(llm, feature_name, requirement, cases, code_excerpts, b
     were shown and the rest discarded, which turned "we didn't look at it" into
     "uncovered". A case is judged uncovered only after EVERY window failed to find it;
     cases proven covered drop out early so the sweep stays affordable.
+
+    `contract_findings` (optional, backward-compatible — omitting it reproduces prior
+    behaviour exactly): pre-computed output of `contracts.find_orphaned_contract_reads(files)`
+    over the WHOLE repo's current file text (the caller, `_codeanalysis_worker`, already holds
+    this in memory and computes it once per run — it is not recomputed here, since this
+    function only ever sees CHUNKED excerpts, not whole-file text).
+
+    Unlike `verify_pr_implementation`'s `repo_files` (which finds a PR's diff and searches for
+    a consumer elsewhere), Mind Map has no diff at all — it reviews one current snapshot — so
+    the evidence here is the snapshot-only signal instead (see contracts.py's
+    `find_orphaned_contract_reads`): a `.get(KEY, ...)` read whose KEY is written nowhere in
+    the repo. The benchmark evidence for this exact bug (AUTH-007) showed the LLM had BOTH the
+    producer and consumer files in front of it and still failed to connect them — a prompting
+    problem, not a missing-evidence one — so this cannot rely on giving the model more text to
+    read alone; the deterministic cap below is what actually holds the line regardless of what
+    the model concludes.
     """
     budget = excerpt_total_chars(llm)
     batch_size = REVIEW_BATCH_SIZE if batch_size is None else max(1, int(batch_size))
     valid = {c["id"]: c for c in cases}
     errored = False
     passes = max(1, int(samples or 1))
+
+    case_break_matches = {}
+    evidence_block = ""
+    if contract_findings:
+        import grounding
+        case_break_matches = grounding.match_contract_breaks_to_cases(contract_findings, cases)
+        lines = []
+        for fnd in contract_findings[:10]:
+            hint = (f" (most similarly-named key written anywhere in the repo: "
+                    f"`{fnd['suggested_replacement_key']}`)" if fnd.get("suggested_replacement_key")
+                    else "")
+            for con in (fnd.get("consumers") or [])[:5]:
+                lines.append(
+                    f"- {con['file']}:{con['line']} (function {con.get('function') or '?'}) reads "
+                    f"`{fnd['old_key']}` via `.get(...)`, but NOTHING in the current codebase "
+                    f"writes that key anywhere{hint}: `{con['snippet']}`")
+        if lines:
+            evidence_block = (
+                "\n\nSTATIC-ANALYSIS EVIDENCE (ground truth — repo-wide scan, not a guess):\n"
+                + "\n".join(lines) +
+                "\n\nEach line above means the fallback/None path is taken UNCONDITIONALLY, every "
+                "single time this code runs, because no producer anywhere in the repository ever "
+                "supplies that key. If a test case depends on this behaving correctly under the "
+                "real (non-fallback) value, it is NOT correctly implemented — use 'uncovered' or "
+                "'partial', never 'covered', for that case.\n")
 
     # Citations are verified against the WHOLE corpus, not just the current window. A file
     # the model saw in an earlier window is still real evidence, so a global index avoids
@@ -912,7 +954,7 @@ def review_code_coverage(llm, feature_name, requirement, cases, code_excerpts, b
                       f"batch {i // batch_size + 1}/{batches}")
             briefs = [{"id": c["id"], "title": c["title"], "type": c["type"],
                        "steps": c.get("steps", [])[:6]} for c in batch]
-            prompt = _codereview_prompt(feature_name, requirement, code, briefs)
+            prompt = _codereview_prompt(feature_name, requirement, code, briefs, evidence_block)
             per_case_samples: dict = {}
             for attempt in range(passes):
                 # First pass stays near-deterministic; extra samples get a little heat so
@@ -971,6 +1013,22 @@ def review_code_coverage(llm, feature_name, requirement, cases, code_excerpts, b
         v = _merge_windows(got)
         v.update({"test_case_id": cid, "display_id": c.get("display_id"),
                   "title": c["title"], "type": c["type"]})
+        # Deterministic cap: an orphaned-contract-read finding relevant to this case means a
+        # real read-site, cited with file:line, unconditionally falls through to a
+        # fallback/None value because nothing in the repo writes that key — that cannot be
+        # 'covered' no matter what the LLM concluded (see the AUTH-007 Mind Map miss this is
+        # designed to catch, where the LLM had this exact evidence in front of it and still
+        # said 'covered'). Enforced independently of the model's own reasoning.
+        if v.get("status") == "covered" and cid in case_break_matches:
+            m0 = case_break_matches[cid][0]
+            f0, con0 = m0["break"], m0["consumer"]
+            v["downgraded_from"] = v.get("downgraded_from", v["status"])
+            v["status"] = "partial"
+            v["needs_review"] = True
+            v["contract_break_cap"] = (
+                f"capped from 'covered': {con0['file']}:{con0['line']} reads `{f0['old_key']}` "
+                f"via `.get(...)`, but nothing in the current codebase writes that key — the "
+                f"fallback/None path is taken unconditionally")
         out.append(v)
 
     res = {"cases": out, "grounding": {
@@ -987,6 +1045,8 @@ def review_code_coverage(llm, feature_name, requirement, cases, code_excerpts, b
                                   if (c.get("grounding") or {}).get("unverifiable")),
         "downgraded_count": sum(1 for c in out if c.get("downgraded_from")),
     }}
+    if contract_findings:
+        res["contract_findings_considered"] = len(contract_findings)
     if errored:
         res["error"] = "one or more review batches failed"
     return res
@@ -1001,12 +1061,27 @@ _PRIMPL_SYS = (
 )
 
 
-def verify_pr_implementation(llm, pr, prod_files, cases, batch_size=10) -> dict:
+def verify_pr_implementation(llm, pr, prod_files, cases, batch_size=10, repo_files=None) -> dict:
     """LLM verifier: which test cases does this PR's PRODUCTION code actually IMPLEMENT?
 
     Judged in batches. Strict: merely touching the same endpoint/file is NOT enough for
     'covered' — the specific behaviour must be implemented in the diff. Returns
     {"covered":[{test_case_id,status:covered|partial,confidence:0-1,rationale}]}.
+
+    `repo_files` (optional, backward-compatible — omitting it reproduces prior behaviour
+    exactly) is the rest of the repository's current file text, the same shape Mind Map
+    already holds in memory per run. When supplied, `contracts.build_contract_breaks()`
+    (see app/contracts.py) statically finds producer/consumer contract changes whose
+    consumers live OUTSIDE this PR's own diff — e.g. a renamed dict key/token claim that an
+    unchanged file elsewhere still reads under the old name. This is the general,
+    non-hardcoded fix for the class of miss where every file this function is handed is
+    drawn only from `prod_files` (the PR's own diff), so a downstream consumer in an
+    untouched file was structurally invisible to the LLM. Two things are grounded on it:
+    (1) an explicit, cited EVIDENCE block is added to the prompt so the LLM reasons from
+    real producer/consumer citations instead of diff-only guessing, and (2) a deterministic
+    cap below the LLM's own judgement — a case tied to an unresolved break can never be
+    reported 'covered' regardless of what the model says, since the downstream consumer
+    provably was not updated by this PR.
     """
     diff = "\n".join(f"{f['filename']} ({f['status']}, +{f.get('additions', 0)}/-{f.get('deletions', 0)})\n"
                      f"{f.get('patch', '')}" for f in prod_files[:25])[:6000]
@@ -1015,6 +1090,45 @@ def verify_pr_implementation(llm, pr, prod_files, cases, batch_size=10) -> dict:
     idx = citation_index([{"repo": "", "path": f.get("filename"), "text": f.get("patch") or ""}
                           for f in prod_files[:25]])
     valid = {c["id"] for c in cases}
+
+    # Deterministic cross-file dependency evidence (app/contracts.py). Local imports:
+    # contracts.py and grounding.py both import from this module (`is_test_file`), so a
+    # module-level import here would be circular depending on load order; deferring to call
+    # time is safe since by then every module involved has already finished loading.
+    contract_breaks = []
+    case_break_matches = {}
+    if repo_files:
+        import contracts
+        import grounding
+        try:
+            deps = contracts.build_contract_breaks(prod_files, repo_files)
+            contract_breaks = deps.get("contract_breaks", [])
+        except Exception:  # noqa: BLE001 - the deterministic layer must never break the verifier
+            contract_breaks = []
+        if contract_breaks:
+            case_break_matches = grounding.match_contract_breaks_to_cases(contract_breaks, cases)
+
+    evidence_block = ""
+    if contract_breaks:
+        lines = []
+        for b in contract_breaks[:10]:
+            change = (f"`{b['old_key']}` -> `{b['new_key']}`" if b.get("old_key") and b.get("new_key")
+                      else f"`{b.get('old_key') or b.get('new_key')}` ({b.get('change_type')})")
+            for con in (b.get("consumers") or [])[:5]:
+                lines.append(
+                    f"- {b['producer_file']}::{b['producer_function']} changed {change}. "
+                    f"Consumer {con['file']}:{con['line']} (function {con.get('function') or '?'}) "
+                    f"still reads the OLD contract and is OUTSIDE this PR's diff — it was NOT "
+                    f"changed by this PR: `{con['snippet']}`")
+        if lines:
+            evidence_block = (
+                "\n\nCROSS-FILE DEPENDENCY EVIDENCE (static analysis, ground truth — these are REAL "
+                "files/lines NOT included in the diff above, found by scanning the rest of the "
+                "repository for consumers of a contract this PR changed):\n" + "\n".join(lines) +
+                "\n\nIf a test case depends on one of these still-unupdated consumers behaving "
+                "correctly with the NEW contract, the PR does NOT fully implement it — use "
+                "'partial' (or omit), never 'covered', for that case.\n")
+
     out, seen, errored = [], set(), False
     for i in range(0, len(cases), batch_size):
         batch = cases[i:i + batch_size]
@@ -1022,7 +1136,8 @@ def verify_pr_implementation(llm, pr, prod_files, cases, batch_size=10) -> dict:
                    "steps": c.get("steps", [])[:6]} for c in batch]
         prompt = (
             f"PULL REQUEST #{pr.get('number')}: {pr.get('title', '')}\n\n"
-            f"CHANGED PRODUCTION CODE (diff; test/spec files excluded):\n{diff}\n\n"
+            f"CHANGED PRODUCTION CODE (diff; test/spec files excluded):\n{diff}"
+            f"{evidence_block}\n\n"
             f"TEST CASES TO JUDGE ({len(briefs)}):\n{json.dumps(briefs)[:5000]}\n\n"
             "For each case, judge whether THIS diff's PRODUCTION code IMPLEMENTS the SPECIFIC behaviour:\n"
             "- 'covered' = the changed code clearly implements this exact behaviour.\n"
@@ -1042,7 +1157,8 @@ def verify_pr_implementation(llm, pr, prod_files, cases, batch_size=10) -> dict:
             continue
         for x in data.get("covered", []):
             if isinstance(x, dict) and x.get("test_case_id") in valid and x["test_case_id"] not in seen:
-                seen.add(x["test_case_id"])
+                cid = x["test_case_id"]
+                seen.add(cid)
                 raw_status = str(x.get("status") or "")
                 st = raw_status if raw_status in ("covered", "partial") else "partial"
                 # floor='partial': this result only reports cases the PR touches, so a
@@ -1050,17 +1166,40 @@ def verify_pr_implementation(llm, pr, prod_files, cases, batch_size=10) -> dict:
                 # would look identical to the model never having mentioned the case.
                 v = _ground_verdict(st, x.get("rationale", ""), x.get("files") or [], idx,
                                     model_confidence=x.get("confidence"), floor="partial")
-                out.append({"test_case_id": x["test_case_id"], "status": v["status"],
-                            "confidence": v["confidence"], "needs_review": v["needs_review"],
+                status = v["status"]
+                needs_review = v["needs_review"]
+                contract_cap = None
+                # Deterministic cap: an unresolved contract break relevant to this case means
+                # a real downstream consumer, outside this PR's diff, still reads the OLD
+                # contract shape — that cannot be 'covered' regardless of the LLM's verdict.
+                # This does not depend on the LLM having used the evidence block at all; it
+                # is enforced independently of what the model said.
+                if status == "covered" and cid in case_break_matches:
+                    m0 = case_break_matches[cid][0]
+                    b0, con0 = m0["break"], m0["consumer"]
+                    change = (f"`{b0['old_key']}`->`{b0['new_key']}`"
+                              if b0.get("old_key") and b0.get("new_key")
+                              else f"`{b0.get('old_key') or b0.get('new_key')}`")
+                    status = "partial"
+                    needs_review = True
+                    contract_cap = (
+                        f"capped from 'covered': {b0['producer_file']}::{b0['producer_function']} "
+                        f"changed {change}, but {con0['file']}:{con0['line']} still reads the old "
+                        f"contract and was not part of this PR's diff")
+                out.append({"test_case_id": cid, "status": status,
+                            "confidence": v["confidence"], "needs_review": needs_review,
                             "rationale": str(x.get("rationale", ""))[:300],
                             "files": v["files"], "files_rejected": v["files_rejected"],
                             "files_ineligible": v["files_ineligible"],
                             "grounding": v["grounding"],
                             **({"downgraded_from": v["downgraded_from"]}
-                               if v.get("downgraded_from") else {})})
+                               if v.get("downgraded_from") else {}),
+                            **({"contract_break_cap": contract_cap} if contract_cap else {})})
     res = {"covered": out,
            "grounding": {"needs_review_count": sum(1 for c in out if c.get("needs_review")),
                          "confidence_threshold": REVIEW_CONFIDENCE_THRESHOLD}}
+    if contract_breaks:
+        res["contract_breaks_considered"] = len(contract_breaks)
     if errored:
         res["error"] = "one or more verify batches failed"
     return res
