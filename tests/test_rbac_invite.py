@@ -108,12 +108,13 @@ class FakeReq:
 @pytest.fixture
 def main_mod(monkeypatch):
     m = _import_main()
+    users_routes = m._users_routes
     fake = FakeUsers()
-    monkeypatch.setattr(m, "store", fake)
-    monkeypatch.setattr(m, "_smtp_cfg", lambda: {"host": "localhost"})
+    monkeypatch.setattr(users_routes, "store", fake)
+    monkeypatch.setattr(users_routes, "_smtp_cfg", lambda: {"host": "localhost"})
     import email_send
     monkeypatch.setattr(email_send, "send_invite", lambda *a, **k: (True, ""))
-    return m, fake
+    return users_routes, fake
 
 
 class TestInvite:

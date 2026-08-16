@@ -53,17 +53,73 @@ This is the mental model the compose files encode.
 
 ## 3. Repo layout (annotated)
 
+**Updated post-refactor (REFACTOR_PLAN.md, Phases 1–6, 2026-08).** `app/main.py` was a
+7,316-line monolith (165 route handlers + 43 Pydantic models interleaved) and `store.py`
+was a 3,889-line, 257-member `Store` class. Both are now decomposed into packages — same
+behavior, same API surface (OpenAPI spec is byte-identical pre/post-refactor; the `Store`
+class still exposes the exact same 257 members), just organized. **New invariants: no DB
+access outside `store/`; no route handlers in `main.py`.**
+
 ```
-app/                    FastAPI backend (~17.8k LOC Python) + Dockerfile (also builds UI)
-  main.py       (6559)  API routes, startup/bootstrap, env-writeback, auth endpoints
-  store.py      (3701)  MongoDB data layer: indexes, vectorSearch + numpy fallback
-  sheet_import.py(1374) XLSX import feature
+app/                    FastAPI backend + Dockerfile (also builds UI)
+  main.py       (201)   App assembly ONLY: FastAPI(), middleware registration, the 20
+                        api/routes/ router includes (static_spa.py LAST — see its
+                        docstring for a FastAPI include_router()/Mount gotcha), startup-
+                        thread wiring. No route handlers, no direct DB access, no
+                        business logic — down from 7,316 lines pre-refactor.
+  core/                  cross-cutting singletons + helpers (no route handlers)
+    config.py     (114) env-derived constants (MONGO_URI, EMBED_MODEL, thresholds…)
+    state.py       (53) singletons: `store`, `SYNC` dict, embedder placeholder
+    security.py   (435) auth_gateway + security_headers + ~26 RBAC helpers, the
+                        principal-resolver registry
+    deps.py       (609) current_llm/current_embedder, git clients, repo/document helpers
+    exceptions.py  (18) `_InvalidId` handler
+    audit.py       (29) `_audit(...)`
+    bootstrap.py  (242) bootstrap(), secret checks, production-posture gate, admin seed
+  workers/               background job registry + one file per job type
+    registry.py    (68) launch_job(), run_tracked(), job-type → worker map
+    generation.py (222) test-case generation, corpus ingestion, embed-switch, DB migration
+    validator_worker.py (33), code_coverage_worker.py (363),
+    codeanalysis_worker.py (433), repo_scan_worker.py (722), test_import_worker.py (214)
+  background/            poller.py (96) GitHub/GitLab sync poller + webhook signature
+                        verification; schedulers.py (62) stale-job sweeper + imported-
+                        sheet re-analysis scheduler
+  api/
+    schemas.py     (21) Pydantic models shared by 2+ routers (avoids router-to-router
+                        imports, which would create cycles)
+    routes/               20 files, one `app.include_router(...)` per file in main.py.
+                        Handler bodies are unchanged aside from the `@app.` -> `@router.`
+                        decorator swap. Extraction order followed dependency depth
+                        (security-sensitive auth/users first; static_spa.py always LAST):
+      documents.py (110) test_cycles.py (210) reports_exports.py (114) auth.py (468)
+      users.py (245) settings.py (577) jira_atlassian.py (187) repos_prs.py (334)
+      steps_test_cases.py (187) validator.py (117) test_plan.py (110)
+      test_import.py (401) projects.py (140) features.py (399) jobs_usage.py (149)
+      code_coverage.py (538) develop.py (42) webhooks.py (130) system.py (87)
+      static_spa.py (61) — LAST; owns the `/assets` StaticFiles mount + SPA fallback
+                        routes (`/`, `/favicon.ico`, `/invite`)
+  store/                 MongoDB data layer, composed from mixins behind one `Store` class
+    __init__.py    (70) `class Store(...)` composes every mixin; `store = Store(...)`
+                        (core/state.py) remains the single module-level singleton —
+                        `from store import Store` still works, every existing
+                        `store.get_feature(...)`-style call site is unchanged
+    base.py       (423) Mongo client/db handle, index setup, shared helpers
+    projects.py (139) features.py (505) steps_test_cases.py (876) jobs.py (177)
+    users_auth.py (212) repos_prs.py (205) code_coverage.py (293) validator_runs.py (135)
+    test_plan_runs.py (76) test_cycles.py (350) documents.py (62) settings.py (44)
+    usage.py (122) sheet_import.py (514) audit.py (53) dashboard.py (121)
+  sheet_import.py(1374) XLSX import feature (top-level module — distinct on purpose from
+                        the same-named `store/sheet_import.py` mixin; Python's absolute
+                        imports make `import sheet_import` vs. relative `from . import
+                        sheet_import` unambiguous, see store/__init__.py's docstring)
   test_plan.py  (915)   test-plan generation
   validator.py  (732)   validator run (Q&A) logic
   report.py     (702)   report/export (reportlab PDF, docx)
   grounding.py  (625)   evidence-backed code grounding (tree-sitter, BM25)
   automation.py (507)   automation coverage
-  coverage.py   (435)   coverage computation
+  coverage.py   (435)   coverage computation — still one file across 7 concerns; an
+                        optional future split into `coverage/` is scoped in
+                        REFACTOR_PLAN.md Phase 9 but not required
   extract.py    (290)   PRD/HLD/LLD extraction (pypdf, python-docx)
   email_send.py (276)   SMTP + OTP email
   llm.py        (218)   LLM provider abstraction (Ollama/OpenAI/Anthropic/Gemini/Bedrock…)
@@ -71,7 +127,7 @@ app/                    FastAPI backend (~17.8k LOC Python) + Dockerfile (also b
   embeddings.py (181)   embedding provider abstraction
   github.py/gitlab.py/jira.py/figma.py   integration clients
   crypto.py     (35)    Fernet-at-rest, keyed off APP_SECRET/ENCRYPTION_KEY
-  workers.py, usage.py, prompts.py, weblinks.py, grounding, testgen/
+  usage.py, prompts.py, weblinks.py, testgen/, scanners.py, contracts.py, api_exec.py
   requirements.txt      fastapi, pymongo, httpx, tree-sitter, numpy, boto3(Bedrock), reportlab…
 
 frontend/               React (Vite + Tailwind) → built into app/static-react/, served by app
@@ -103,11 +159,12 @@ tests/                        pytest suite (RBAC, pipeline, grounding, sheet imp
 
 ---
 
-## 4. Startup / bootstrap sequence (`app/main.py`)
+## 4. Startup / bootstrap sequence (`core/bootstrap.py`, wired from `main.py`)
 
-On `@app.on_event("startup")` a background `bootstrap()` thread runs (plus a stale-job
-sweeper and import-reanalysis scheduler). `BOOT = {stage, ready, detail}` tracks progress
-for the UI. Order:
+`main.py`'s `@app.on_event("startup")` handler starts a background `bootstrap()` thread
+(the function itself now lives in `core/bootstrap.py`, not `main.py` — see §3), plus a
+stale-job sweeper and import-reanalysis scheduler (`background/schedulers.py`).
+`BOOT = {stage, ready, detail}` tracks progress for the UI. Order:
 
 1. **`_ensure_app_secret()`** — zero-config: if the effective secret is still weak/unset
    AND `.env` is writable AND no `SESSION_SECRET`/`ENCRYPTION_KEY` split is in play,

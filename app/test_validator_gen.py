@@ -4,7 +4,11 @@ import json
 
 sys.path.insert(0, '/app')
 
-from main import store, current_llm
+# REFACTOR_PLAN.md Phase 6 (router 19/20): current_llm's only remaining call
+# site (status()) moved to api/routes/system.py, so main.py no longer
+# re-exports it — import it from its home (core/deps.py) directly.
+from main import store
+from core.deps import current_llm
 import validator
 
 feature_id = '6a3cd1e25a99fc841269cc87'

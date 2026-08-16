@@ -6,6 +6,7 @@ _OLD_CWD = Path.cwd()
 try:
     os.chdir(_ROOT / "app")
     import main
+    from workers import repo_scan_worker
 finally:
     os.chdir(_OLD_CWD)
 
@@ -91,8 +92,12 @@ class FakeStoreForImportDelete:
 
 
 def test_promote_imported_row_reuses_prior_promoted_case(monkeypatch):
+    # REFACTOR_PLAN.md Phase 3: _promote_imported_row_to_feature now lives in
+    # workers/repo_scan_worker.py, which has its own `store` name-import — patching
+    # main.store doesn't reach it (main just re-exports the same function object;
+    # it still runs with repo_scan_worker's own globals).
     fake_store = FakeStoreForPromotion()
-    monkeypatch.setattr(main, "store", fake_store)
+    monkeypatch.setattr(repo_scan_worker, "store", fake_store)
 
     case_id = main._promote_imported_row_to_feature(
         "row-1",
@@ -114,8 +119,12 @@ def test_promote_imported_row_reuses_prior_promoted_case(monkeypatch):
 
 
 def test_remove_imported_sheet_rows_expands_source_group_for_permanent_delete(monkeypatch):
+    # REFACTOR_PLAN.md Phase 6 (router 12/20): remove_imported_sheet_rows now lives in
+    # api/routes/test_import.py, which has its own `store` name-import — patching
+    # main.store doesn't reach it (main just re-exports the same function object; it
+    # still runs with api.routes.test_import's own globals).
     fake_store = FakeStoreForImportDelete()
-    monkeypatch.setattr(main, "store", fake_store)
+    monkeypatch.setattr(main._test_import_routes, "store", fake_store)
 
     result = main.remove_imported_sheet_rows(
         "f1",

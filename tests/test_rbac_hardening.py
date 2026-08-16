@@ -74,14 +74,15 @@ class TestOtpThrottle:
             def set_otp(self, *a):
                 state["otp_set"] += 1
 
-        monkeypatch.setattr(M, "store", FS())
-        monkeypatch.setattr(M, "OTP_MAX_PER_WINDOW", 2)
-        monkeypatch.setattr(M, "_deliver_otp", lambda *a, **k: ("sent", ""))
-        body = M.OtpRequestIn(email="x@y.com")
-        M.request_otp(body)
-        M.request_otp(body)
+        auth_routes = M._auth_routes
+        monkeypatch.setattr(auth_routes, "store", FS())
+        monkeypatch.setattr(auth_routes, "OTP_MAX_PER_WINDOW", 2)
+        monkeypatch.setattr(auth_routes, "_deliver_otp", lambda *a, **k: ("sent", ""))
+        body = auth_routes.OtpRequestIn(email="x@y.com")
+        auth_routes.request_otp(body)
+        auth_routes.request_otp(body)
         assert state["otp_set"] == 2
-        r = M.request_otp(body)          # count 3 > limit 2
+        r = auth_routes.request_otp(body)          # count 3 > limit 2
         assert r == {"sent": True} and state["otp_set"] == 2
 
 

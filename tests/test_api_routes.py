@@ -91,7 +91,10 @@ def test_request_otp_bootstraps_first_admin(monkeypatch):
     monkeypatch.setattr(main.store, "otp_recent_issue_count", lambda uid, window: 0)
     monkeypatch.setattr(main.store, "set_otp", lambda uid, h, exp: None)
     # No SMTP configured -> "logged" delivery path, code returned in dev_code.
-    monkeypatch.setattr(main, "_deliver_otp", lambda *a, **kw: ("logged", "123456"))
+    # request_otp itself now lives in api/routes/auth.py (Phase 6 extraction),
+    # so the module-level _deliver_otp it calls must be patched there, not on
+    # main (which no longer defines it after the move).
+    monkeypatch.setattr(main._auth_routes, "_deliver_otp", lambda *a, **kw: ("logged", "123456"))
 
     r = client.post("/api/auth/request-otp", json={"email": "first@example.com"})
     assert r.status_code == 200

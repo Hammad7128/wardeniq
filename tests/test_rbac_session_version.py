@@ -85,7 +85,7 @@ class TestPatchUserBumpsSessionVersion:
                 state["sv"] += 1
                 return self.get_user(uid)
 
-        monkeypatch.setattr(m, "store", FS())
+        monkeypatch.setattr(m._users_routes, "store", FS())
         return m, state
 
     def _req(self):
@@ -94,20 +94,20 @@ class TestPatchUserBumpsSessionVersion:
     def test_role_change_bumps_sv(self, env):
         m, state = env
         assert state["sv"] == 0
-        m.patch_user("u1", m.UserPatch(role="editor"), self._req())
+        m._users_routes.patch_user("u1", m._users_routes.UserPatch(role="editor"), self._req())
         assert state["role"] == "editor" and state["sv"] == 1
 
     def test_disable_bumps_sv(self, env):
         m, state = env
-        m.patch_user("u1", m.UserPatch(active=False), self._req())
+        m._users_routes.patch_user("u1", m._users_routes.UserPatch(active=False), self._req())
         assert state["active"] is False and state["sv"] == 1
 
     def test_name_only_does_not_bump_sv(self, env):
         m, state = env
-        m.patch_user("u1", m.UserPatch(name="New Name"), self._req())
+        m._users_routes.patch_user("u1", m._users_routes.UserPatch(name="New Name"), self._req())
         assert state["name"] == "New Name" and state["sv"] == 0
 
     def test_same_role_noop_does_not_bump(self, env):
         m, state = env
-        m.patch_user("u1", m.UserPatch(role="viewer"), self._req())
+        m._users_routes.patch_user("u1", m._users_routes.UserPatch(role="viewer"), self._req())
         assert state["sv"] == 0

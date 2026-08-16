@@ -795,6 +795,9 @@ branch/title contain the key auto-link back. Posting results back to Jira is on 
 
 ```
 app/            wardenIQ backend (FastAPI) + Dockerfile (also builds the UI)
+                (organized as core/, workers/, background/, api/routes/, store/ — see
+                PROJECT_CONTEXT.md §3 for the full annotated breakdown; invariants:
+                no DB access outside store/, no route handlers in main.py)
 frontend/       React UI (built into app/static-react/ and served by the app)
 config/         mongod.conf, mongot.conf, replica-set init, mongot password file
 docker-compose.yml        the app + Mongo replica set + mongot + Ollama

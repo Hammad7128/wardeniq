@@ -188,16 +188,24 @@ class TestSmtpAndPasswordLogin:
     @classmethod
     def setup_class(cls):
         cls.main = _import_main()
+        # smtp_status/login_password/request_otp/verify_otp and their Pydantic models
+        # moved to api/routes/auth.py in Phase 6 (REFACTOR_PLAN.md) — main.py imports
+        # that module as `_auth_routes`, so it's reachable via the already-imported
+        # main module without a second chdir-guarded import. `store`/`_smtp_cfg`/
+        # `_deliver_otp` must be patched on THIS module (auth_routes), not on `main` —
+        # each module got its own name binding at import time, so patching main's
+        # binding would not affect the router's.
+        cls.auth_routes = cls.main._auth_routes
 
     def test_smtp_status_endpoint(self, monkeypatch):
         # 1. When SMTP is configured:
-        monkeypatch.setattr(self.main, "_smtp_cfg", lambda: {"host": "smtp.gmail.com"})
-        r = self.main.smtp_status()
+        monkeypatch.setattr(self.auth_routes, "_smtp_cfg", lambda: {"host": "smtp.gmail.com"})
+        r = self.auth_routes.smtp_status()
         assert r == {"smtp_setup": True}
 
         # 2. When SMTP is not configured:
-        monkeypatch.setattr(self.main, "_smtp_cfg", lambda: None)
-        r = self.main.smtp_status()
+        monkeypatch.setattr(self.auth_routes, "_smtp_cfg", lambda: None)
+        r = self.auth_routes.smtp_status()
         assert r == {"smtp_setup": False}
 
     def test_login_password_endpoint_flow(self, monkeypatch):
@@ -220,7 +228,7 @@ class TestSmtpAndPasswordLogin:
                 pass
 
         fs = FakeStore()
-        monkeypatch.setattr(self.main, "store", fs)
+        monkeypatch.setattr(self.auth_routes, "store", fs)
 
         # Mock Response
         class FakeResponse:
@@ -230,30 +238,30 @@ class TestSmtpAndPasswordLogin:
                 self.cookies[name] = value
 
         # 1. When SMTP is configured, password login must fail
-        monkeypatch.setattr(self.main, "_smtp_cfg", lambda: {"host": "smtp.gmail.com"})
-        body = self.main.LoginPasswordIn(username="admin", password="admin123")
-        with pytest.raises(self.main.HTTPException) as exc:
-            self.main.login_password(body, FakeResponse())
+        monkeypatch.setattr(self.auth_routes, "_smtp_cfg", lambda: {"host": "smtp.gmail.com"})
+        body = self.auth_routes.LoginPasswordIn(username="admin", password="admin123")
+        with pytest.raises(self.auth_routes.HTTPException) as exc:
+            self.auth_routes.login_password(body, FakeResponse())
         assert exc.value.status_code == 400
         assert "Password login is disabled" in exc.value.detail
 
         # 2. When SMTP is not configured:
-        monkeypatch.setattr(self.main, "_smtp_cfg", lambda: None)
+        monkeypatch.setattr(self.auth_routes, "_smtp_cfg", lambda: None)
 
         # 2a. Wrong credentials must fail
-        body = self.main.LoginPasswordIn(username="admin", password="wrongpassword")
-        with pytest.raises(self.main.HTTPException) as exc:
-            self.main.login_password(body, FakeResponse())
+        body = self.auth_routes.LoginPasswordIn(username="admin", password="wrongpassword")
+        with pytest.raises(self.auth_routes.HTTPException) as exc:
+            self.auth_routes.login_password(body, FakeResponse())
         assert exc.value.status_code == 401
         assert "Invalid username or password" in exc.value.detail
 
         # 2b. Correct credentials must succeed and bootstrap user
-        body = self.main.LoginPasswordIn(username="admin", password="admin123")
+        body = self.auth_routes.LoginPasswordIn(username="admin", password="admin123")
         resp = FakeResponse()
-        r = self.main.login_password(body, resp)
+        r = self.auth_routes.login_password(body, resp)
         assert r["user"]["email"] == "admin"
         assert r["user"]["role"] == "admin"
-        assert self.main.auth.SESSION_COOKIE in resp.cookies
+        assert self.auth_routes.auth.SESSION_COOKIE in resp.cookies
 
     def test_request_otp_first_run_with_admin(self, monkeypatch):
         class FakeStore:
@@ -273,15 +281,15 @@ class TestSmtpAndPasswordLogin:
                 pass
 
         fs = FakeStore()
-        monkeypatch.setattr(self.main, "store", fs)
-        monkeypatch.setattr(self.main, "_deliver_otp", lambda *a, **k: ("sent", ""))
+        monkeypatch.setattr(self.auth_routes, "store", fs)
+        monkeypatch.setattr(self.auth_routes, "_deliver_otp", lambda *a, **k: ("sent", ""))
 
         # Create the local admin user (non-valid email)
         fs.create_user("admin", "Admin", "admin")
 
         # Request OTP for a new valid email
-        body = self.main.OtpRequestIn(email="samyak@adlerqa.in")
-        r = self.main.request_otp(body)
+        body = self.auth_routes.OtpRequestIn(email="samyak@adlerqa.in")
+        r = self.auth_routes.request_otp(body)
 
         # It should bootstrap the user and return sent
         assert r["sent"] is True
@@ -329,7 +337,7 @@ class TestSmtpAndPasswordLogin:
                 pass
 
         fs = FakeStore()
-        monkeypatch.setattr(self.main, "store", fs)
+        monkeypatch.setattr(self.auth_routes, "store", fs)
 
         # Create admin user
         admin = fs.create_user("admin", "Admin", "admin")
@@ -337,7 +345,7 @@ class TestSmtpAndPasswordLogin:
         # Set fake OTP code on admin
         import time
         code = "123456"
-        h = self.main.auth.hash_otp(code)
+        h = self.auth_routes.auth.hash_otp(code)
         fs.set_otp(admin["id"], h, time.time() + 600)
 
         # Mock Response
@@ -348,9 +356,9 @@ class TestSmtpAndPasswordLogin:
                 self.cookies[name] = value
 
         # Call verify_otp with real email
-        body = self.main.OtpVerifyIn(email="samyak@adlerqa.in", code=code)
+        body = self.auth_routes.OtpVerifyIn(email="samyak@adlerqa.in", code=code)
         resp = FakeResponse()
-        r = self.main.verify_otp(body, resp)
+        r = self.auth_routes.verify_otp(body, resp)
 
         # Check that it migrated admin to samyak@adlerqa.in
         assert r["user"]["email"] == "samyak@adlerqa.in"

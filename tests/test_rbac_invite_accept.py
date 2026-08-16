@@ -119,11 +119,15 @@ class Resp:
 @pytest.fixture
 def env(monkeypatch):
     m = _import_main()
+    auth_routes = m._auth_routes
+    users_routes = m._users_routes
     fake = FakeUsers()
     monkeypatch.setattr(m, "store", fake)
-    monkeypatch.setattr(m, "_deliver_otp", lambda *a, **k: ("sent", ""))
+    monkeypatch.setattr(auth_routes, "store", fake)
+    monkeypatch.setattr(auth_routes, "_deliver_otp", lambda *a, **k: ("sent", ""))
+    monkeypatch.setattr(users_routes, "store", fake)
     admin = fake.create_user("admin@x.com", "Admin", "admin")
-    inv = m.invite_user(m.UserIn(email="new@x.com", name="New", role="viewer"),
+    inv = users_routes.invite_user(users_routes.UserIn(email="new@x.com", name="New", role="viewer"),
                         Req(user={"id": admin["id"]}))
     return m, fake, admin, inv["user"]
 
@@ -131,8 +135,9 @@ def env(monkeypatch):
 class TestMyInviteView:
     def test_pending_invite_shows_inviter_role_workspace(self, env, monkeypatch):
         m, fake, admin, u = env
-        monkeypatch.setattr(m, "_session_user", lambda req: fake.get_user(u["id"]))
-        inv = m.my_invite(Req())["invite"]
+        auth_routes = m._auth_routes
+        monkeypatch.setattr(auth_routes, "_session_user", lambda req: fake.get_user(u["id"]))
+        inv = auth_routes.my_invite(Req())["invite"]
         assert inv["pending"] is True
         assert inv["role"] == "viewer"
         assert inv["invited_by"]["email"] == "admin@x.com"
@@ -141,42 +146,47 @@ class TestMyInviteView:
 
     def test_non_pending_user_has_no_pending_invite(self, env, monkeypatch):
         m, fake, admin, u = env
-        monkeypatch.setattr(m, "_session_user", lambda req: fake.get_user(admin["id"]))
-        assert m.my_invite(Req())["invite"]["pending"] is False
+        auth_routes = m._auth_routes
+        monkeypatch.setattr(auth_routes, "_session_user", lambda req: fake.get_user(admin["id"]))
+        assert auth_routes.my_invite(Req())["invite"]["pending"] is False
 
 
 class TestAccept:
     def test_accept_flips_to_accepted(self, env, monkeypatch):
         m, fake, admin, u = env
-        monkeypatch.setattr(m, "_session_user", lambda req: fake.get_user(u["id"]))
-        r = m.accept_my_invite(Req())
+        auth_routes = m._auth_routes
+        monkeypatch.setattr(auth_routes, "_session_user", lambda req: fake.get_user(u["id"]))
+        r = auth_routes.accept_my_invite(Req())
         assert fake.docs[u["id"]]["invite_status"] == "accepted"
         assert r["invite"]["pending"] is False
         assert r["user"]["invite_status"] == "accepted"
 
     def test_accept_idempotent(self, env, monkeypatch):
         m, fake, admin, u = env
+        auth_routes = m._auth_routes
         fake.docs[u["id"]]["invite_status"] = "accepted"
-        monkeypatch.setattr(m, "_session_user", lambda req: fake.get_user(u["id"]))
-        assert m.accept_my_invite(Req())["invite"]["pending"] is False
+        monkeypatch.setattr(auth_routes, "_session_user", lambda req: fake.get_user(u["id"]))
+        assert auth_routes.accept_my_invite(Req())["invite"]["pending"] is False
 
 
 class TestDecline:
     def test_decline_deactivates_and_clears_cookie(self, env, monkeypatch):
         m, fake, admin, u = env
-        monkeypatch.setattr(m, "_session_user", lambda req: fake.get_user(u["id"]))
+        auth_routes = m._auth_routes
+        monkeypatch.setattr(auth_routes, "_session_user", lambda req: fake.get_user(u["id"]))
         resp = Resp()
-        r = m.decline_my_invite(Req(), resp)
+        r = auth_routes.decline_my_invite(Req(), resp)
         assert r["declined"] is True
         assert fake.docs[u["id"]]["invite_status"] == "declined"
         assert fake.docs[u["id"]]["active"] is False
-        assert m.auth.SESSION_COOKIE in resp.deleted
+        assert auth_routes.auth.SESSION_COOKIE in resp.deleted
 
     def test_decline_when_not_pending_is_noop(self, env, monkeypatch):
         m, fake, admin, u = env
+        auth_routes = m._auth_routes
         fake.docs[u["id"]]["invite_status"] = "accepted"
-        monkeypatch.setattr(m, "_session_user", lambda req: fake.get_user(u["id"]))
-        assert m.decline_my_invite(Req(), Resp())["declined"] is False
+        monkeypatch.setattr(auth_routes, "_session_user", lambda req: fake.get_user(u["id"]))
+        assert auth_routes.decline_my_invite(Req(), Resp())["declined"] is False
 
 
 class TestLoginDoesNotAutoAccept:

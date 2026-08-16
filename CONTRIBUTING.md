@@ -55,13 +55,28 @@ printed to the server log — `docker logs warden-app`). Configure SMTP under
 
 ## Repository layout
 
-The project instructions in `CLAUDE.md` are the authoritative overview.
-Highlights:
+See `PROJECT_CONTEXT.md` §3 for the full annotated breakdown. Highlights
+(updated for the backend restructure — `app/main.py` and `app/store.py` were
+split into packages; behavior is unchanged, see REFACTOR_PLAN.md):
 
-- `app/main.py` — FastAPI routes, `auth_gateway` middleware, background job
-  workers, GitHub poller. Routes orchestrate only.
-- `app/store.py` — **all** MongoDB and mongot access lives here. Do not add
-  DB calls elsewhere.
+- `app/main.py` (201 lines) — app assembly only: `FastAPI()`, middleware
+  registration, the 20 `api/routes/` router includes. **No route handlers
+  live here anymore** — see `app/api/routes/`.
+- `app/api/routes/` — one file per route domain (auth, users, projects,
+  features, code_coverage, …), 20 files total, each an `APIRouter` included
+  in `main.py`. Routes orchestrate only.
+- `app/store/` — **all** MongoDB and mongot access lives here (composed from
+  per-domain mixin files behind one `Store` class, `store/__init__.py`). Do
+  not add DB calls elsewhere.
+- `app/core/` — cross-cutting singletons/helpers: `config.py` (env
+  constants), `state.py` (the `store`/`SYNC` singletons), `security.py`
+  (RBAC + `auth_gateway`/`security_headers` middleware), `deps.py` (LLM/git
+  clients), `bootstrap.py` (startup sequence), `audit.py`, `exceptions.py`.
+- `app/workers/` — the background job registry (`registry.py`) plus one file
+  per job type (generation, validator, code_coverage, codeanalysis,
+  repo_scan, test_import).
+- `app/background/` — the GitHub/GitLab sync poller and the stale-job /
+  imported-sheet-reanalysis schedulers.
 - `app/llm.py`, `app/prompts.py` — pluggable LLM client and prompt strings.
 - `app/coverage.py` — PR→feature mapping, PR coverage, Mind Map reviewer,
   impact analysis, version diff.
@@ -75,6 +90,9 @@ Highlights:
 - `docker-compose.yml`, `run.sh`, `collect-logs.sh` — local dev entry points.
 - `tests/` — pytest suite.
 
+**Invariants (enforced by the restructure): no DB access outside `app/store/`;
+no route handlers in `app/main.py`.**
+
 ---
 
 ## Coding conventions
@@ -82,9 +100,10 @@ Highlights:
 Please follow the same rules the maintainers do — most of them exist for a
 reason.
 
-- **All database access lives in `app/store.py`.** Add a helper there and call
-  it from your route; do not use `store.mongo` directly from `main.py` or a
-  feature module.
+- **All database access lives in `app/store/`.** Add a helper to the mixin
+  file for that domain (e.g. `store/projects.py` for project-related
+  queries) and call it from your route; do not use `store.mongo`/`store.db`
+  directly from `main.py`, `app/api/routes/`, or a feature module.
 - **All LLM prompt logic lives in `app/coverage.py` and `app/prompts.py`.**
   Routes should orchestrate, not build prompts inline.
 - **Secrets go through `app/crypto.py`** (Fernet, keyed by `APP_SECRET`) and
@@ -92,8 +111,9 @@ reason.
 - **Embeddings and LLM calls go through the `Embedder` and `LLM` classes** so
   providers can be swapped without changes at the call site.
 - **Mongo is schemaless — no migrations folder.** If you change the data
-  model, update the `_ensure_*` helpers in `app/store.py` so fresh installs
-  and existing databases converge, and document the change in `CHANGELOG.md`.
+  model, update the `_ensure_*` helpers in `app/store/base.py` so fresh
+  installs and existing databases converge, and document the change in
+  `CHANGELOG.md`.
 - **Keep diffs small and compatible.** wardenIQ is `v0.1.0-beta`; users are
   running it. Prefer additive changes over breaking ones.
 - **Do not commit generated artifacts, `.env` files, credentials, or
@@ -120,8 +140,8 @@ pytest
 
 Guidelines:
 
-- Add tests for new functionality where practical, especially in
-  `app/store.py`, `app/auth.py`, `app/coverage.py`, and any new route.
+- Add tests for new functionality where practical, especially in `app/store/`,
+  `app/auth.py`, `app/coverage.py`, and any new `app/api/routes/` file.
 - Do **not** rely on real external services in tests — mock GitHub, GitLab,
   SMTP, LLM providers, and Ollama.
 - Prefer the fake-store pattern used in `tests/test_rbac_invite.py` for

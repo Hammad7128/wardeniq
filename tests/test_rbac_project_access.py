@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from core import security
+
 _ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -69,12 +71,16 @@ class TestTargetProjectForPath:
         assert M._target_project_for_path("GET", "/api/users") is None
 
     def test_feature_path_resolves_via_store(self, monkeypatch):
-        monkeypatch.setattr(M, "store", types.SimpleNamespace(
+        # REFACTOR_PLAN.md Phase 2: _target_project_for_path/_project_of_feature now
+        # live in core/security.py, which has its own `store` name-import — patching
+        # main.store doesn't reach them (main just re-exports the same function
+        # object; it still runs with core.security's own globals).
+        monkeypatch.setattr(security, "store", types.SimpleNamespace(
             get_feature=lambda fid: {"id": fid, "project_id": "pFEAT"}))
         assert M._target_project_for_path("GET", "/api/features/f9") == "pFEAT"
 
     def test_repo_path_resolves_via_store(self, monkeypatch):
-        monkeypatch.setattr(M, "store", types.SimpleNamespace(
+        monkeypatch.setattr(security, "store", types.SimpleNamespace(
             get_repo=lambda rid: {"id": rid, "project_id": "pREPO"}))
         assert M._target_project_for_path("DELETE", "/api/repos/r1") == "pREPO"
 
@@ -142,9 +148,9 @@ class TestInviteProjectScope:
                 return None
 
 
-        monkeypatch.setattr(M, "store", FS())
-        monkeypatch.setattr(M, "_deliver_otp", lambda *a, **k: ("sent", ""))
-        return M
+        monkeypatch.setattr(M._users_routes, "store", FS())
+        monkeypatch.setattr(M._auth_routes, "_deliver_otp", lambda *a, **k: ("sent", ""))
+        return M._users_routes
 
     def _req(self):
         return types.SimpleNamespace(state=types.SimpleNamespace(

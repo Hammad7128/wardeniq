@@ -9,6 +9,7 @@ HMAC-signed cookies built with the real `auth.sign_session`.
 """
 import auth
 import main
+from core import state
 from fastapi.testclient import TestClient
 
 # See tests/test_api_routes.py for why: avoids a real (hanging) Mongo call
@@ -118,7 +119,10 @@ def test_viewer_allowed_on_viewer_post_allowlist(monkeypatch):
         def embed(self, text, task="query"):
             return [0.0] * 8
 
-    monkeypatch.setattr(main, "embedder", _FakeEmbedder())
+    # REFACTOR_PLAN.md 2.6: embedder now lives in core/state.py and every
+    # consumer reads it via the qualified `state.embedder` — patch it there
+    # (not `main.embedder`, which nothing reads anymore after Phase 2).
+    monkeypatch.setattr(state, "embedder", _FakeEmbedder())
     monkeypatch.setattr(main.store, "search_cases", lambda emb, limit=5, ctype=None: ([], {}))
     r = client.post("/api/retrieve", json={"text": "login works", "limit": 3},
                      cookies=_cookie_for("u1"))
