@@ -45,7 +45,8 @@ def _ensure_app_secret():
     we leave it alone entirely — auto-filling just one half of an intentional split
     would be more confusing than helpful.
     """
-    from main import _env_file_writable, _write_env_var  # see module docstring
+    from api.routes.settings import _env_file_writable
+    from core.deps import _write_env_var
 
     if not auth.secret_is_weak():
         return
@@ -93,7 +94,7 @@ def _check_production_posture():
     """In a production posture (APP_ENV=production) refuse to boot with settings that
     are acceptable only for local development. Fails closed so an insecure instance
     never comes up on the public internet by accident."""
-    from main import _smtp_cfg  # see module docstring
+    from core.deps import _smtp_cfg # see module docstring
 
     if not IS_PRODUCTION:
         return

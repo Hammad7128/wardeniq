@@ -16,6 +16,7 @@ first" — the 2.2 fix (INDEX_RULES_FINGERPRINT, used below via
 Phase 1 began, so this move carries it forward unchanged.
 """
 from datetime import datetime, timedelta, timezone
+import threading
 
 import coverage as cov
 import contracts
@@ -32,6 +33,13 @@ from core.state import store  # noqa: F401  (bare name-import is safe: store is
                                # mutated, never rebound)
 
 from workers.registry import JOB_WORKERS
+
+# Heartbeat cadence (seconds) for the indexing/embedding phase in
+# _codeanalysis_worker. Embedding and archive-fetching are both blocking network
+# calls, and a SINGLE such call can itself run long enough to outlast the
+# frontend's 2-minute stall detector (STALL_MS in legacyApp.js) even though the
+# backend's own stale-job TTL is 600s - see the heartbeat thread below.
+EMBED_HEARTBEAT_SECONDS = 45
 
 
 def _codeanalysis_worker(jid, params):
@@ -58,6 +66,29 @@ def _codeanalysis_worker(jid, params):
     # repos. On the fresh-fetch path (below) the whole-file text is already in hand from
     # `extractmod.source_files_from_tar`, so it is reused directly with no second fetch.
     all_repo_files = []
+    # Background heartbeat for the indexing phase below (archive fetch +
+    # embedding, across every repo in this job). Ticks on a fixed timer,
+    # independent of how long any single blocking call takes. Stopped explicitly
+    # once indexing finishes (see below); the status check here is a safety net
+    # for the one path that skips that explicit stop - an exception propagating
+    # out of the loop below - so this can never keep writing a stale stage onto
+    # a job that has already reached a final status (e.g. during the review
+    # phase's own heartbeating, or after the job failed).
+    _heartbeat_message = ["indexing — starting…"]
+    _heartbeat_stop = threading.Event()
+
+    def _heartbeat_loop():
+        while not _heartbeat_stop.wait(EMBED_HEARTBEAT_SECONDS):
+            try:
+                j = store.get_job(jid)
+                if not j or j.get("status") != "running":
+                    return
+                store.update_job(jid, stage=_heartbeat_message[0])
+            except Exception:  # noqa: BLE001
+                pass
+
+    _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    _heartbeat_thread.start()
     for repo in repos:
         provider = (repo.get("git_provider") or "github").lower()
         ref = (branches.get(repo["id"]) or "").strip() or branch_override \
@@ -77,6 +108,7 @@ def _codeanalysis_worker(jid, params):
         if not force_reindex and rules_ok and head and meta and meta.get("sha") == head and \
                 store.code_chunks.count_documents({"repo_id": repo["id"]}) > 0:
             store.update_job(jid, stage=f"reusing index — {repo['full_name']}@{ref} (unchanged)")
+            _heartbeat_message[0] = f"reusing index — {repo['full_name']}@{ref} (unchanged)"
             paths = set()
             for d in store.code_chunks_for_repo(repo["id"]):
                 mem.append((d["repo"], d["path"], d["text"], d["embedding"]))
@@ -91,6 +123,7 @@ def _codeanalysis_worker(jid, params):
             all_repo_files.extend(_fetch_repo_snapshot_files(repo, ref))
             continue
         store.update_job(jid, stage=f"fetching {provider} code — {repo['full_name']}@{ref or 'default'}")
+        _heartbeat_message[0] = f"fetching {provider} code — {repo['full_name']}@{ref or 'default'}"
         try:
             data = _repo_get_archive(repo, ref)
         except Exception as e:  # noqa: BLE001
@@ -123,6 +156,9 @@ def _codeanalysis_worker(jid, params):
                 continue
             repo_paths.append(path)
             for i, ch in enumerate(grounding.chunk_code_by_function(text, path)):
+                # Heartbeat message only - the background thread above does the
+                # actual (rate-limited) store.update_job() write.
+                _heartbeat_message[0] = f"embedding {repo['full_name']} — {path} ({total} chunk(s) so far)"
                 emb = state.embedder.embed(ch)
                 mem.append((repo["full_name"], path, ch, emb))
                 batch.append({"project_id": project_id, "repo_id": repo["id"],
@@ -152,6 +188,8 @@ def _codeanalysis_worker(jid, params):
                                      f"{repo_tests} tests skipped, "
                                      f"{repo_non_impl} non-implementation skipped "
                                      f"({stats['total_files']} total)")
+    _heartbeat_stop.set()
+    _heartbeat_thread.join(timeout=1)
     store.merge_job_result(jid, code_chunks=total, tests_skipped=tests_skipped,
                            non_impl_skipped=non_impl_skipped,
                            repos=[r["full_name"] for r in repos], errors=errors,
