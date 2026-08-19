@@ -1,10 +1,4 @@
-"""PR → feature mapping, LLM coverage review, version diff, and test-code generation.
 
-Every verdict in this module is produced by an LLM and then GROUNDED against
-something deterministic before it is trusted: a cited file must be one we actually
-put in front of the model, and identifiers named in a rationale must really appear
-in that file. The LLM proposes; the index disposes. See `_ground_verdict`.
-"""
 import hashlib
 import json
 import os

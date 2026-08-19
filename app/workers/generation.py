@@ -1,22 +1,4 @@
-"""Test-case generation, corpus ingestion, embedding-model switch, and DB
-migration job workers. Also the "develop" job (generate an implementation
-from a feature's test cases and open a PR) — not in REFACTOR_PLAN.md's
-explicit file list (a documented deviation, same reasoning as `_oid`/
-`jira_client` in core/deps.py), placed here because it is the mirror
-operation of `_gen_worker`: that generates TEST CASES from a requirement;
-`_develop_worker` generates CODE from test cases. Both are "generation" jobs.
 
-Moved out of main.py (Phase 3 of REFACTOR_PLAN.md). Grouped together because
-`_ingest_worker` chains directly into `_gen_worker` on the same job, exactly
-as REFACTOR_PLAN.md's file list for this module implies.
-
-CRITICAL — embedder rebind (REFACTOR_PLAN.md section 2.6): `_reembed_worker`
-performs the app's ONE live reassignment of the embedder singleton, via the
-qualified `state.embedder = current_embedder()` — never `global embedder`.
-Every other consumer (this module's own `_gen_worker`/`_ingest_worker`, and
-every worker/route elsewhere) reads `state.embedder` through the `state`
-module object, never a bare name-import, so they all observe this rebind.
-"""
 import re
 import time
 

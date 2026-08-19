@@ -1,8 +1,4 @@
-"""Passwordless auth primitives: stateless signed-cookie sessions and email OTP.
 
-No new dependencies — sessions are HMAC-signed tokens keyed by APP_SECRET (the same
-secret crypto.py uses). Rotating APP_SECRET invalidates all sessions and pending OTPs.
-"""
 import base64
 import hashlib
 import hmac

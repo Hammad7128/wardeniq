@@ -1,22 +1,5 @@
-"""The "codeanalysis" (Mind Map) job: index a project's implementation repos
-and map every active feature's test cases to covered / partial / uncovered
-against the actual code. Also the "analyze" job (grounded commit / impact
-analysis) — not in REFACTOR_PLAN.md's explicit file list (a documented
-deviation, same reasoning as `_oid`/`jira_client` in core/deps.py), placed
-here because it shares this file's exact dependency shape (grounding, cov,
-current_llm, _implementation_repo_docs, _fetch_repo_snapshot_files) and sat
-immediately adjacent to `_codeanalysis_worker` in the original main.py — both
-are "read the actual repo/commits and judge test-case coverage against it"
-jobs, just anchored to a time window (commits) vs. a full repo snapshot.
 
-Moved out of main.py (Phase 3 of REFACTOR_PLAN.md). REFACTOR_PLAN.md flags
-this file as "heavily modified in `2d284d2`; make sure 2.2's fix has landed
-first" — the 2.2 fix (INDEX_RULES_FINGERPRINT, used below via
-`cov.INDEX_RULES_FINGERPRINT`) landed in the Phase 0 pre-flight work, before
-Phase 1 began, so this move carries it forward unchanged.
-"""
 from datetime import datetime, timedelta, timezone
-import threading
 
 import coverage as cov
 import contracts
@@ -32,14 +15,8 @@ from core.deps import (
 from core.state import store  # noqa: F401  (bare name-import is safe: store is
                                # mutated, never rebound)
 
+from workers.heartbeat import heartbeat
 from workers.registry import JOB_WORKERS
-
-# Heartbeat cadence (seconds) for the indexing/embedding phase in
-# _codeanalysis_worker. Embedding and archive-fetching are both blocking network
-# calls, and a SINGLE such call can itself run long enough to outlast the
-# frontend's 2-minute stall detector (STALL_MS in legacyApp.js) even though the
-# backend's own stale-job TTL is 600s - see the heartbeat thread below.
-EMBED_HEARTBEAT_SECONDS = 45
 
 
 def _codeanalysis_worker(jid, params):
@@ -67,129 +44,112 @@ def _codeanalysis_worker(jid, params):
     # `extractmod.source_files_from_tar`, so it is reused directly with no second fetch.
     all_repo_files = []
     # Background heartbeat for the indexing phase below (archive fetch +
-    # embedding, across every repo in this job). Ticks on a fixed timer,
-    # independent of how long any single blocking call takes. Stopped explicitly
-    # once indexing finishes (see below); the status check here is a safety net
-    # for the one path that skips that explicit stop - an exception propagating
-    # out of the loop below - so this can never keep writing a stale stage onto
-    # a job that has already reached a final status (e.g. during the review
-    # phase's own heartbeating, or after the job failed).
+    # embedding, across every repo in this job). A LIVE caption via the shared
+    # heartbeat() helper (workers/heartbeat.py) — narrower than the generic
+    # per-job heartbeat launch_job() already wraps every worker in, because
+    # this phase wants the SPECIFIC file/repo being worked on in the caption,
+    # not just a re-touched timestamp on whatever stage was last set.
     _heartbeat_message = ["indexing — starting…"]
-    _heartbeat_stop = threading.Event()
-
-    def _heartbeat_loop():
-        while not _heartbeat_stop.wait(EMBED_HEARTBEAT_SECONDS):
+    with heartbeat(jid, message=lambda: _heartbeat_message[0]):
+        for repo in repos:
+            provider = (repo.get("git_provider") or "github").lower()
+            ref = (branches.get(repo["id"]) or "").strip() or branch_override \
+                or repo.get("default_branch", "")
+            # Incremental reuse: if the branch head hasn't changed since we last indexed this
+            # repo, reuse the stored chunks instead of re-fetching the tarball + re-embedding.
             try:
-                j = store.get_job(jid)
-                if not j or j.get("status") != "running":
-                    return
-                store.update_job(jid, stage=_heartbeat_message[0])
+                head = _repo_branch_sha(repo, ref) if ref else None
             except Exception:  # noqa: BLE001
-                pass
-
-    _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
-    _heartbeat_thread.start()
-    for repo in repos:
-        provider = (repo.get("git_provider") or "github").lower()
-        ref = (branches.get(repo["id"]) or "").strip() or branch_override \
-            or repo.get("default_branch", "")
-        # Incremental reuse: if the branch head hasn't changed since we last indexed this
-        # repo, reuse the stored chunks instead of re-fetching the tarball + re-embedding.
-        try:
-            head = _repo_branch_sha(repo, ref) if ref else None
-        except Exception:  # noqa: BLE001
-            head = None
-        meta = store.get_code_index(repo["id"])
-        # Reuse requires BOTH an unchanged branch head AND an index built by the current
-        # exclusion rules. The rules fingerprint is what makes `force_reindex` unnecessary
-        # in normal use: change what counts as a spec file and every stale index rebuilds
-        # itself, instead of quietly serving chunks filtered by the old rules.
-        rules_ok = (meta or {}).get("rules") == cov.INDEX_RULES_FINGERPRINT
-        if not force_reindex and rules_ok and head and meta and meta.get("sha") == head and \
-                store.code_chunks.count_documents({"repo_id": repo["id"]}) > 0:
-            store.update_job(jid, stage=f"reusing index — {repo['full_name']}@{ref} (unchanged)")
-            _heartbeat_message[0] = f"reusing index — {repo['full_name']}@{ref} (unchanged)"
-            paths = set()
-            for d in store.code_chunks_for_repo(repo["id"]):
-                mem.append((d["repo"], d["path"], d["text"], d["embedding"]))
-                paths.add(d["path"]); total += 1
+                head = None
+            meta = store.get_code_index(repo["id"])
+            # Reuse requires BOTH an unchanged branch head AND an index built by the current
+            # exclusion rules. The rules fingerprint is what makes `force_reindex` unnecessary
+            # in normal use: change what counts as a spec file and every stale index rebuilds
+            # itself, instead of quietly serving chunks filtered by the old rules.
+            rules_ok = (meta or {}).get("rules") == cov.INDEX_RULES_FINGERPRINT
+            if not force_reindex and rules_ok and head and meta and meta.get("sha") == head and \
+                    store.code_chunks.count_documents({"repo_id": repo["id"]}) > 0:
+                store.update_job(jid, stage=f"reusing index — {repo['full_name']}@{ref} (unchanged)")
+                _heartbeat_message[0] = f"reusing index — {repo['full_name']}@{ref} (unchanged)"
+                paths = set()
+                for d in store.code_chunks_for_repo(repo["id"]):
+                    mem.append((d["repo"], d["path"], d["text"], d["embedding"]))
+                    paths.add(d["path"]); total += 1
+                per_repo.append({"repo": repo["full_name"], "branch": ref or "default",
+                                 "impl_files": len(paths), "reused": True, "git_provider": provider})
+                print(f"[wardenIQ][mindmap] {repo['full_name']}@{ref}: reused index "
+                      f"({len(paths)} impl files, head {head[:7]})", flush=True)
+                # `mem` above only has stored function chunks for a reused repo, not whole-file
+                # text — fetch a best-effort whole-repo snapshot separately so contract-break
+                # detection sees full file contents even when this repo's index was reused as-is.
+                all_repo_files.extend(_fetch_repo_snapshot_files(repo, ref))
+                continue
+            store.update_job(jid, stage=f"fetching {provider} code — {repo['full_name']}@{ref or 'default'}")
+            _heartbeat_message[0] = f"fetching {provider} code — {repo['full_name']}@{ref or 'default'}"
+            try:
+                data = _repo_get_archive(repo, ref)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{repo['full_name']}@{ref}: {e}")
+                per_repo.append({"repo": repo["full_name"], "branch": ref, "error": str(e)[:200]})
+                continue
+            files, stats = extractmod.source_files_from_tar(data, return_stats=True)
+            # Whole-file text is already in hand from this fetch — reuse it directly for
+            # contract-break detection instead of issuing a second archive fetch.
+            all_repo_files.extend({"path": p, "text": t} for p, t in files)
+            store.clear_code_chunks(repo["id"])
+            batch = []
+            repo_paths, repo_tests, repo_chunks = [], 0, 0
+            repo_non_impl = 0
+            for path, text in files:
+                # Mind Map judges IMPLEMENTATION coverage only. Test/spec files are
+                # excluded — whether an automated test exists is tracked separately.
+                if cov.is_test_file(path):
+                    tests_skipped += 1; repo_tests += 1
+                    continue
+                # Files that cannot implement anything — type declarations, tool config, seed
+                # data, migrations — are dropped on a SEPARATE counter. `tests_skipped` has to
+                # keep meaning "developer-authored tests", because automation coverage reports
+                # that number and lumping `activity.types.ts` in would inflate it.
+                # `text` is passed so the content rule applies: a path rule cannot safely tell
+                # `types/activity.types.ts` (declarations only) from a runtime helper that
+                # happens to live in types/, but the file body can.
+                if cov.is_non_implementation_file(path, text):
+                    non_impl_skipped += 1; repo_non_impl += 1
+                    continue
+                repo_paths.append(path)
+                for i, ch in enumerate(grounding.chunk_code_by_function(text, path)):
+                    # Heartbeat message only - the background thread above does the
+                    # actual (rate-limited) store.update_job() write.
+                    _heartbeat_message[0] = f"embedding {repo['full_name']} — {path} ({total} chunk(s) so far)"
+                    emb = state.embedder.embed(ch)
+                    mem.append((repo["full_name"], path, ch, emb))
+                    batch.append({"project_id": project_id, "repo_id": repo["id"],
+                                  "repo": repo["full_name"], "path": path, "chunk_index": i,
+                                  "text": ch, "embedding": emb})
+                    total += 1; repo_chunks += 1
+                    if len(batch) >= 100:
+                        store.add_code_chunks(batch); batch = []
+            if batch:
+                store.add_code_chunks(batch)
+            if head:
+                store.set_code_index(repo["id"], head, repo_chunks, len(repo_paths),
+                                     rules=cov.INDEX_RULES_FINGERPRINT)
             per_repo.append({"repo": repo["full_name"], "branch": ref or "default",
-                             "impl_files": len(paths), "reused": True, "git_provider": provider})
-            print(f"[wardenIQ][mindmap] {repo['full_name']}@{ref}: reused index "
-                  f"({len(paths)} impl files, head {head[:7]})", flush=True)
-            # `mem` above only has stored function chunks for a reused repo, not whole-file
-            # text — fetch a best-effort whole-repo snapshot separately so contract-break
-            # detection sees full file contents even when this repo's index was reused as-is.
-            all_repo_files.extend(_fetch_repo_snapshot_files(repo, ref))
-            continue
-        store.update_job(jid, stage=f"fetching {provider} code — {repo['full_name']}@{ref or 'default'}")
-        _heartbeat_message[0] = f"fetching {provider} code — {repo['full_name']}@{ref or 'default'}"
-        try:
-            data = _repo_get_archive(repo, ref)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{repo['full_name']}@{ref}: {e}")
-            per_repo.append({"repo": repo["full_name"], "branch": ref, "error": str(e)[:200]})
-            continue
-        files, stats = extractmod.source_files_from_tar(data, return_stats=True)
-        # Whole-file text is already in hand from this fetch — reuse it directly for
-        # contract-break detection instead of issuing a second archive fetch.
-        all_repo_files.extend({"path": p, "text": t} for p, t in files)
-        store.clear_code_chunks(repo["id"])
-        batch = []
-        repo_paths, repo_tests, repo_chunks = [], 0, 0
-        repo_non_impl = 0
-        for path, text in files:
-            # Mind Map judges IMPLEMENTATION coverage only. Test/spec files are
-            # excluded — whether an automated test exists is tracked separately.
-            if cov.is_test_file(path):
-                tests_skipped += 1; repo_tests += 1
-                continue
-            # Files that cannot implement anything — type declarations, tool config, seed
-            # data, migrations — are dropped on a SEPARATE counter. `tests_skipped` has to
-            # keep meaning "developer-authored tests", because automation coverage reports
-            # that number and lumping `activity.types.ts` in would inflate it.
-            # `text` is passed so the content rule applies: a path rule cannot safely tell
-            # `types/activity.types.ts` (declarations only) from a runtime helper that
-            # happens to live in types/, but the file body can.
-            if cov.is_non_implementation_file(path, text):
-                non_impl_skipped += 1; repo_non_impl += 1
-                continue
-            repo_paths.append(path)
-            for i, ch in enumerate(grounding.chunk_code_by_function(text, path)):
-                # Heartbeat message only - the background thread above does the
-                # actual (rate-limited) store.update_job() write.
-                _heartbeat_message[0] = f"embedding {repo['full_name']} — {path} ({total} chunk(s) so far)"
-                emb = state.embedder.embed(ch)
-                mem.append((repo["full_name"], path, ch, emb))
-                batch.append({"project_id": project_id, "repo_id": repo["id"],
-                              "repo": repo["full_name"], "path": path, "chunk_index": i,
-                              "text": ch, "embedding": emb})
-                total += 1; repo_chunks += 1
-                if len(batch) >= 100:
-                    store.add_code_chunks(batch); batch = []
-        if batch:
-            store.add_code_chunks(batch)
-        if head:
-            store.set_code_index(repo["id"], head, repo_chunks, len(repo_paths),
-                                 rules=cov.INDEX_RULES_FINGERPRINT)
-        per_repo.append({"repo": repo["full_name"], "branch": ref or "default",
-                         "git_provider": provider,
-                         "files_in_repo": stats["total_files"], "code_matched": len(files),
-                         "impl_files": len(repo_paths), "test_files": repo_tests,
-                         "non_impl_files": repo_non_impl,
-                         "extensions": stats["top_ext"],
-                         "impl_sample": repo_paths[:40],
-                         "sample": stats["sample"] if not files else []})
-        print(f"[wardenIQ][mindmap] {repo['full_name']}@{ref or 'default'}: "
-              f"{len(repo_paths)} impl files, {repo_tests} tests skipped, "
-              f"{repo_non_impl} non-implementation skipped, "
-              f"{stats['total_files']} total. files={repo_paths[:60]}", flush=True)
-        store.update_job(jid, stage=f"indexed {repo['full_name']} — {len(repo_paths)} impl files, "
-                                     f"{repo_tests} tests skipped, "
-                                     f"{repo_non_impl} non-implementation skipped "
-                                     f"({stats['total_files']} total)")
-    _heartbeat_stop.set()
-    _heartbeat_thread.join(timeout=1)
+                             "git_provider": provider,
+                             "files_in_repo": stats["total_files"], "code_matched": len(files),
+                             "impl_files": len(repo_paths), "test_files": repo_tests,
+                             "non_impl_files": repo_non_impl,
+                             "extensions": stats["top_ext"],
+                             "impl_sample": repo_paths[:40],
+                             "sample": stats["sample"] if not files else []})
+            print(f"[wardenIQ][mindmap] {repo['full_name']}@{ref or 'default'}: "
+                  f"{len(repo_paths)} impl files, {repo_tests} tests skipped, "
+                  f"{repo_non_impl} non-implementation skipped, "
+                  f"{stats['total_files']} total. files={repo_paths[:60]}", flush=True)
+            store.update_job(jid, stage=f"indexed {repo['full_name']} — {len(repo_paths)} impl files, "
+                                         f"{repo_tests} tests skipped, "
+                                         f"{repo_non_impl} non-implementation skipped "
+                                         f"({stats['total_files']} total)")
     store.merge_job_result(jid, code_chunks=total, tests_skipped=tests_skipped,
                            non_impl_skipped=non_impl_skipped,
                            repos=[r["full_name"] for r in repos], errors=errors,

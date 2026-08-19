@@ -1,48 +1,4 @@
-"""Producer/consumer CONTRACT dependency analysis — general-purpose, not feature-specific.
 
-## Why this module exists
-
-The Authentication pilot benchmark (see internal evaluation `AUTHENTICATION_PILOT_FINAL_EVALUATION.md`,
-AUTH-007 / PR #9) found that `verify_pr_implementation`, `analyze_impact`, and
-`grounding.match_commit_changes` all missed a PR that renamed a JWT claim key
-(`"role"` -> `"user_role"`) inside an EXISTING function's body. The root cause, confirmed by
-reading the actual source:
-
-  * `verify_pr_implementation` (coverage.py) builds its LLM prompt from ONLY the PR's own
-    changed files. Downstream consumer files the PR never touched are structurally invisible
-    to it, so the LLM has no way to know a consumer still expects the old key.
-  * `analyze_impact` (coverage.py) is pure LLM guessing over a diff-only change summary, with
-    no dependency graph at all.
-  * `grounding.match_commit_changes`'s deterministic pre-filter only extracts symbols that are
-    NEWLY DECLARED on added diff lines (`extract_symbols`). A dict-literal key change inside an
-    existing function's body never touches a `def` line, so the function is never even
-    recognised as "changed", and there is no logic anywhere that looks for CONSUMERS of a
-    changed key/contract in files outside the diff.
-
-This module is the missing layer: a deterministic, offline, unit-testable static-analysis pass
-that (1) identifies what a diff's PRODUCER code changed about a data contract (a dict/object key
-it writes, an attribute/model field, or a function whose body changed at all), and (2) searches
-the CURRENT whole-repo snapshot (files the diff never touched) for CONSUMERS that still read the
-old contract. It is intentionally general — nothing here is keyed to "role", "tokens.py",
-"middleware.py", or any AUTH-* identifier. The same mechanism applies to:
-
-  * dictionary/object key renames or removals (JWT claims, API response bodies, event payloads)
-  * function return-value shape changes (a `return {...}` dict literal is just another producer)
-  * model/schema field renames (`self.field = ...` / class-body `field: Type` writes)
-  * configuration-key renames (`config.get("KEY")` / `config["KEY"]` is the same dict pattern)
-  * shared-utility behavior changes (a function's body changed at all -> find its call sites
-    elsewhere in the repo, independent of any key-level change)
-
-Design rules (matching `grounding.py`, which this module is a companion to):
-  * No LLM calls and no DB/network access here — pure, deterministic, unit-testable logic.
-  * No hardcoded domain vocabulary or filenames.
-  * Evidence, not certainty: this surfaces candidate producer/consumer relationships with
-    file:line citations for a human or an LLM to weigh — it deliberately never asserts a verdict
-    (covered/uncovered) itself. Callers (grounding.match_commit_changes, coverage.verify_pr_implementation,
-    the Mind Map review path) decide how much weight to give it, and existing anti-noise
-    machinery (case domain-token guards, fan-out caps) already in grounding.py is reused rather
-    than duplicated.
-"""
 from __future__ import annotations
 
 import re

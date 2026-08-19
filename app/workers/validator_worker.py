@@ -1,7 +1,4 @@
-"""The "validator" job: generate a requirements-validator run for a feature.
 
-Moved out of main.py (Phase 3 of REFACTOR_PLAN.md).
-"""
 from core.deps import current_llm
 from core.state import store  # noqa: F401  (bare name-import is safe: store is
                                # mutated, never rebound)

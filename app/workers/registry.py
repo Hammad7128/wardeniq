@@ -1,16 +1,10 @@
-"""Job registry and the two ways work gets run in the background.
 
-Moved out of main.py (Phase 3 of REFACTOR_PLAN.md). `JOB_WORKERS` is a plain
-dict mutated in place (`JOB_WORKERS["type"] = fn`) by each worker module at
-import time, never reassigned wholesale — so main.py's `from workers.registry
-import JOB_WORKERS` (a bare name-import) stays correct, same reasoning as
-`store`/`SYNC` in core/state.py.
-"""
 import threading
 
 import usage
 from core.state import store  # noqa: F401  (bare name-import is safe: store is
                                               # mutated, never rebound)
+from workers.heartbeat import heartbeat
 
 JOB_WORKERS = {}   # job type -> worker(jid, params)
 
@@ -22,7 +16,14 @@ def launch_job(jtype, params, label="", project_id=None, feature_id=None):
     def run():
         usage.start()   # record all LLM/embedding tokens spent by this job's thread
         try:
-            JOB_WORKERS[jtype](jid, params)
+            # Wraps the ENTIRE worker call, not just the pieces that already call
+            # update_job_progress() themselves — a worker's single long blocking
+            # call (an LLM generation, an archive fetch) would otherwise leave
+            # updated_at stale long enough to look "unresponsive" to the frontend's
+            # stall detector or the backend's own stale-job sweep, even though it's
+            # still working. See workers/heartbeat.py for the full rationale.
+            with heartbeat(jid):
+                JOB_WORKERS[jtype](jid, params)
             j = store.get_job(jid)
             if j and j.get("status") == "running":
                 store.update_job(jid, status="succeeded", stage="done", progress=100)
@@ -53,7 +54,11 @@ def run_tracked(jtype, fn, *, label="", project_id=None, feature_id=None):
     result = None
     usage.start()
     try:
-        result = fn()
+        # Same reasoning as launch_job's heartbeat wrap above: `fn()` here is
+        # typically a single long LLM-judged coverage/impact call (PR coverage,
+        # test-plan generation) with no internal progress ticks of its own.
+        with heartbeat(jid):
+            result = fn()
         j = store.get_job(jid)
         if j and j.get("status") == "running":
             store.update_job(jid, status="succeeded", stage="done", progress=100)

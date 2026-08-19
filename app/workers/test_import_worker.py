@@ -1,13 +1,4 @@
-"""The "test_import" job: parse an uploaded sheet, score rows against a
-feature, store canonical rows in the project pool, promote matches.
 
-Moved out of main.py (Phase 3 of REFACTOR_PLAN.md). Physically interleaved
-with workers/repo_scan_worker.py's imported-sheet helpers in the original
-main.py; several of those helpers (`_reuse_existing_import_rows`,
-`_import_evidence_ok`, `_promote_imported_row_to_feature`,
-`_sheet_steps_preview`, `_feature_doc_for_import_context`) are reused here via
-an explicit cross-module import rather than duplicated.
-"""
 from core.deps import current_llm
 from core.state import store  # noqa: F401  (bare name-import is safe: store is
                                # mutated, never rebound)

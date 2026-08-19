@@ -1,30 +1,4 @@
-"""Test-repo scanning + the imported-sheet ("QA library") pipeline.
 
-Moved out of main.py (Phase 3 of REFACTOR_PLAN.md). Two logically distinct but
-interleaved groups of code from the original main.py land here together
-because they share helpers and neither is meaningfully splittable further per
-the plan's file list:
-
-  * `_test_repo_scan_worker` — the "test_repo_scan" job: downloads a connected
-    test repo's tarball, extracts test titles, hybrid-matches them against a
-    feature's generated cases, persists automation coverage.
-  * The imported-sheet ("QA library") helpers — `_create_imported_testcase`
-    through `_apply_import_overlays` — score/promote/rescan rows uploaded via
-    the sheet-import flow. `workers/test_import_worker.py`'s `_test_import_worker`
-    (job type "test_import") is the primary external caller of several of
-    these (`_reuse_existing_import_rows`, `_import_evidence_ok`,
-    `_promote_imported_row_to_feature`, `_sheet_steps_preview`,
-    `_feature_doc_for_import_context`) and imports them back from this module
-    rather than duplicating them, since it was physically interleaved with
-    this code in the original main.py.
-
-`store` and `state.embedder` are consumed via qualified access
-(`state.embedder`, not `from core.state import embedder`) for the reason
-documented in core/state.py: embedder is reassigned at runtime by
-`_reembed_worker` and a bare name-import would freeze a stale reference.
-`store` itself is only ever mutated in place, so the bare name-import here is
-safe (same reasoning as workers/registry.py).
-"""
 import os
 import re
 import time

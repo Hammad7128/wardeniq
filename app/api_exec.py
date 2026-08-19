@@ -1,26 +1,4 @@
-"""Execute API test cases for real and record a genuine pass/fail.
 
-Why this exists
----------------
-Every other quality signal in wardenIQ terminates in an LLM's judgement. This module is
-the first that terminates in an OBSERVED FACT: an HTTP request was sent, a real status
-code came back, and it either matched the expectation or it didn't. That is the same
-move that makes CodeAnt AI's security findings more trusted than a scanner's guess —
-don't assert the behaviour, exercise it.
-
-Scope, honestly
----------------
-* API cases only. They are the one test type whose intent is fully mechanisable (method,
-  path, expected status) without a browser or a fixture harness.
-* Assertion is on the response STATUS CODE, plus optional required/forbidden body
-  substrings and a JSON-path-free key check. It does NOT verify database side effects or
-  `negative_assertions` — those stay human-judged, and `execute_case` says so in its
-  result rather than implying a full verification.
-* A case with no usable structured request data is reported `skipped` with a reason,
-  never guessed at and never silently counted as passing.
-* Requires an explicitly configured base URL. There is no default target, so this can
-  never accidentally fire traffic at production.
-"""
 import json
 import os
 import re

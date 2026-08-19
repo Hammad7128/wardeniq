@@ -1,15 +1,4 @@
-"""Automation coverage: scan a connected test repo, extract test cases, then
-match each extracted test against the wardenIQ-generated cases.
 
-Matching is **hybrid**:
-  1. Cheap, deterministic Jaccard + domain-boost prefilter narrows down to the
-     top K=5 candidate generated cases per scanned test.
-  2. An LLM verifier picks the single best match (or "no match") with a score
-     and short rationale.
-
-This is more recall-friendly than Node's pure-Jaccard matcher while still
-keeping LLM cost bounded (one verifier call per generated case, not per pair).
-"""
 from __future__ import annotations
 
 import io
