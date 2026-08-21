@@ -49,67 +49,228 @@ function renderStepList() {
 
   const filtered = ALL_STEPS.filter((s) => {
     if (searchVal) {
-      const inAction = (s.action || "").toLowerCase().includes(searchVal);
-      const inExpected = (s.expected || "").toLowerCase().includes(searchVal);
-      if (!inAction && !inExpected) return false;
-    }
-    const detectedType = getStepType(s.action);
-    if (typeFilter) {
-      if (typeFilter === "Other") {
-        if (["given", "when", "then", "and"].includes(detectedType))
-          return false;
-      } else if (typeFilter === "And") {
-        if (detectedType !== "and") return false;
-      } else {
-        if (detectedType !== typeFilter.toLowerCase()) return false;
+      const inAction = (s.action || "")
+        .toLowerCase()
+        .includes(searchVal);
+
+      const inExpected = (s.expected || "")
+        .toLowerCase()
+        .includes(searchVal);
+
+      if (!inAction && !inExpected) {
+        return false;
       }
     }
-    if (usageFilter) {
-      if (usageFilter === "used" && s.used_in_cases === 0) return false;
-      if (usageFilter === "unused" && s.used_in_cases > 0) return false;
+
+    const detectedType = getStepType(s.action);
+
+    if (typeFilter) {
+      if (typeFilter === "Other") {
+        if (
+          ["given", "when", "then", "and"].includes(
+            detectedType,
+          )
+        ) {
+          return false;
+        }
+      } else if (typeFilter === "And") {
+        if (detectedType !== "and") {
+          return false;
+        }
+      } else if (
+        detectedType !== typeFilter.toLowerCase()
+      ) {
+        return false;
+      }
     }
+
+    if (usageFilter) {
+      if (
+        usageFilter === "used" &&
+        s.used_in_cases === 0
+      ) {
+        return false;
+      }
+
+      if (
+        usageFilter === "unused" &&
+        s.used_in_cases > 0
+      ) {
+        return false;
+      }
+    }
+
     return true;
   });
 
-  // Given/When/Then convey the step's role (setup / action / assertion) and are shown
-  // as a colored inline prefix. "And/But" is intentionally NOT shown here: it only
-  // means "continues the line above", which is meaningless in this flat, reused-out-of-
-  // -order library — so those steps show as a plain (capitalized) sentence instead.
-  const KW = { given: "Given", when: "When", then: "Then" };
+  const KW = {
+    given: "Given",
+    when: "When",
+    then: "Then",
+  };
 
   tbody.innerHTML =
     filtered
       .map((s) => {
         const t = getStepType(s.action);
-        const isSelected = SELECTED_STEP_ID === s.id ? " selected" : "";
-        const kw = KW[t]; // undefined for "and"/"but" and plain actions → no keyword prefix
-        const kwHtml = kw ? `<span class="step-kw ${t}">${kw}</span>` : "";
+
+        const isSelected =
+          SELECTED_STEP_ID === s.id
+            ? " selected"
+            : "";
+
+        const kw = KW[t];
+
+        const kwHtml = kw
+          ? `<span class="step-kw ${t}">${kw}</span>`
+          : "";
+
         let base = getStepBase(s.action);
-        if (!kw && base) base = base.charAt(0).toUpperCase() + base.slice(1); // standalone sentence
+
+        if (!kw && base) {
+          base =
+            base.charAt(0).toUpperCase() +
+            base.slice(1);
+        }
+
         const actionText = esc(base);
-        const expected = (s.expected || "").trim();
+
+        const expected = (
+          s.expected || ""
+        ).trim();
+
         const used = s.used_in_cases;
+
         const usageHtml =
           used > 0
-            ? `<span class="step-usage" title="Used in ${used} test case${used === 1 ? "" : "s"}">${used} case${used === 1 ? "" : "s"}</span>`
-            : `<span class="step-usage unused" title="Not referenced by any test case yet">Unused</span>`;
+            ? `
+              <span
+                class="step-usage"
+                title="Used in ${used} test case${used === 1 ? "" : "s"}"
+              >
+                ${used} case${used === 1 ? "" : "s"}
+              </span>
+            `
+            : `
+              <span
+                class="step-usage unused"
+                title="Not referenced by any test case yet"
+              >
+                Unused
+              </span>
+            `;
 
-        return `<div class="step-item${isSelected}" onclick="selectStepRow(event, '${s.id}')">
-      <div class="step-item-main">
-        <div class="step-line">${kwHtml}<span class="step-text">${actionText}</span></div>
-        ${expected ? `<div class="step-expected"><span class="step-exp-label">Expected</span>${esc(expected)}</div>` : ""}
-      </div>
-      <div class="step-item-meta" onclick="event.stopPropagation()">
-        ${usageHtml}
-        <div class="step-actions">
-          <button class="step-act-btn" onclick="editStepFromMap('${s.id}')">Edit</button>
-          <button class="step-act-btn del" onclick="delStepLib('${s.id}')">Delete</button>
-        </div>
-      </div>
-    </div>`;
+        return `
+          <div
+            class="step-item${isSelected}"
+            onclick="selectStepRow(event, '${s.id}')"
+          >
+            <div class="step-item-main">
+
+              <div class="step-line">
+                ${kwHtml}
+
+                <span class="step-text">
+                  ${actionText}
+                </span>
+              </div>
+
+              ${
+                expected
+                  ? `
+                    <div class="step-expected">
+                      <span class="step-exp-label">
+                        Expected
+                      </span>
+
+                      <span>
+                        ${esc(expected)}
+                      </span>
+                    </div>
+                  `
+                  : ""
+              }
+
+            </div>
+
+            <div
+              class="step-item-meta"
+              onclick="event.stopPropagation()"
+            >
+              ${usageHtml}
+
+              <div class="step-actions">
+
+                <!-- EDIT -->
+                <button
+                  type="button"
+                  class="step-act-btn step-edit-btn"
+                  title="Edit step"
+                  aria-label="Edit step"
+                  onclick="editStepFromMap('${s.id}')"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 20h9"></path>
+
+                    <path
+                      d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"
+                    ></path>
+                  </svg>
+                </button>
+
+                <!-- DELETE -->
+                <button
+                  type="button"
+                  class="step-act-btn step-delete-btn"
+                  title="Delete step"
+                  aria-label="Delete step"
+                  onclick="delStepLib('${s.id}')"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 6h18"></path>
+
+                    <path d="M8 6V4h8v2"></path>
+
+                    <path
+                      d="M19 6l-1 14H6L5 6"
+                    ></path>
+
+                    <path d="M10 11v5"></path>
+                    <path d="M14 11v5"></path>
+                  </svg>
+                </button>
+
+              </div>
+            </div>
+          </div>
+        `;
       })
       .join("") ||
-    `<div class="muted" style="text-align:center;padding:32px">No matching steps found.</div>`;
+    `
+      <div class="step-library-empty">
+        <div class="step-library-empty-icon">
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <circle cx="11" cy="11" r="7"></circle>
+            <path d="m20 20-4-4"></path>
+          </svg>
+        </div>
+
+        <strong>No matching steps</strong>
+
+        <span>
+          Try changing your search or filters.
+        </span>
+      </div>
+    `;
 }
 
 window.selectStepRow = (event, id) => {

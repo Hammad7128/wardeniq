@@ -1,63 +1,306 @@
+import "../styles/usage.css";
+
 /**
  * UsagePage
  *
- * Structural React port of the original static screen markup.
- * Data loading and mutation behavior is currently supplied by the domain
- * compatibility controllers under src/compat/runtime/controllers.
- * Keeping the DOM contract here lets the UI be migrated screen-by-screen
- * without a single monolithic HTML template.
+ * UI structure only.
+ * Existing API/data behavior remains handled by the usage controller.
  */
 export default function UsagePage() {
   return (
     <section id="view-usage" className="view" hidden>
-      <div className="mindmap-shell">
-        <div className="mindmap-hero usage-hero">
-          <div className="mindmap-toolbar">
-            <div>
-              <h2>LLM usage &amp; cost</h2>
-              <div className="sub">Monitor and control AI spend. Every process — test-case generation, PR coverage, commit &amp; Mind-Map analysis, and ingestion — reports the tokens it consumed and which model it used. This dashboard rolls that up into total tokens, spend by model, spend by project, and a per-process breakdown so you can see exactly where cost comes from.</div>
-            </div>
-            <div className="mindmap-hero-actions">
-              <button className="ghost mindmap-refresh-btn" id="usage-refresh">
-                <span className="icon">↻</span>
-                <span>Refresh</span>
-              </button>
-            </div>
+      <div className="usage-page">
+        {/* =====================================================
+            PAGE HEADER
+        ====================================================== */}
+        <div className="usage-header">
+          <div>
+            <span className="usage-eyebrow">AI OPERATIONS</span>
+
+            <h1>LLM Usage &amp; Cost</h1>
+
+            <p>
+              Monitor token consumption and AI spend across WardenIQ.
+            </p>
           </div>
-          <div id="usage-totals" className="usage-stats"></div>
-          <div className="usage-formula">Cost = (input tokens ÷ 1,000,000 × input price) + (output tokens ÷ 1,000,000 × output price), per model, summed per process. Prices come from the per-model table below (editable); local Ollama models are free. Figures can still differ slightly from a provider console when prompt caching or batch discounts apply.</div>
+
+          <button
+            type="button"
+            className="ghost usage-refresh"
+            id="usage-refresh"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M20 11a8 8 0 1 0-2.34 5.66" />
+              <path d="M20 4v7h-7" />
+            </svg>
+
+            <span>Refresh</span>
+          </button>
         </div>
-        <div className="card">
-          <h3 style={{ margin: "0 0 8px", fontSize: "14px" }}>Recent processes</h3>
-          <input id="usage-recent-search" className="usage-search" placeholder="Search process, project, or feature\u2026" />
-          <div id="usage-recent"></div>
+
+        {/* =====================================================
+            KPI CARDS
+            Controller inserts cards here
+        ====================================================== */}
+        <div
+          id="usage-totals"
+          className="usage-stats"
+        />
+
+        {/* =====================================================
+            COST INFORMATION
+        ====================================================== */}
+        <div className="usage-cost-info">
+          <div className="usage-info-icon">
+            <svg
+              viewBox="0 0 24 24"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 11v5" />
+              <path d="M12 8h.01" />
+            </svg>
+          </div>
+
+          <div>
+            <strong>How cost is calculated</strong>
+
+            <span>
+              Cost is calculated from input and output tokens using each
+              model&apos;s configured pricing. Local Ollama models are free.
+              Provider totals may vary slightly because of caching or batch
+              discounts.
+            </span>
+          </div>
         </div>
-        <details className="card usage-collapse" open>
-          <summary>
-            <span className="usage-collapse-title">By model</span>
-            <span className="usage-collapse-hint muted">tokens &amp; cost per model</span>
-          </summary>
-          <div className="usage-filter-row">
-            <label className="muted">Model</label>
-            <select id="usage-model-filter" className="usage-select">
-              <option value="">All models</option>
-            </select>
+
+        {/* =====================================================
+            RECENT PROCESSES
+        ====================================================== */}
+        <section className="usage-panel usage-recent-panel">
+          <div className="usage-panel-header">
+            <div className="usage-panel-heading">
+              <div className="usage-section-icon blue">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="17"
+                  height="17"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M3 12h4l2-7 4 14 2-7h6" />
+                </svg>
+              </div>
+
+              <div>
+                <h2>Recent processes</h2>
+
+                <p>
+                  Review token usage and estimated cost for each AI operation.
+                </p>
+              </div>
+            </div>
+
+            <div className="usage-search-wrapper">
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-4-4" />
+              </svg>
+
+              <input
+                id="usage-recent-search"
+                className="usage-search"
+                placeholder="Search process, project or feature..."
+              />
+            </div>
           </div>
-          <div id="usage-by-model"></div>
-        </details>
-        <details className="card usage-collapse">
-          <summary>
-            <span className="usage-collapse-title">By project</span>
-            <span className="usage-collapse-hint muted">tokens &amp; cost per project</span>
-          </summary>
-          <div className="usage-filter-row">
-            <label className="muted">Project</label>
-            <select id="usage-project-filter" className="usage-select">
-              <option value="">All projects</option>
-            </select>
+
+          <div className="usage-table-area">
+            <div id="usage-recent" />
           </div>
-          <div id="usage-by-project"></div>
-        </details>
+        </section>
+
+        {/* =====================================================
+            MODEL / PROJECT BREAKDOWN
+        ====================================================== */}
+        <div className="usage-breakdown-grid">
+          {/* BY MODEL */}
+          <details
+            className="usage-breakdown-card"
+            open
+          >
+            <summary>
+              <div className="usage-breakdown-heading">
+                <div className="usage-section-icon violet">
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="17"
+                    height="17"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <rect
+                      x="4"
+                      y="4"
+                      width="16"
+                      height="16"
+                      rx="3"
+                    />
+                    <path d="M8 9h8" />
+                    <path d="M8 13h5" />
+                  </svg>
+                </div>
+
+                <div>
+                  <span className="usage-breakdown-title">
+                    By model
+                  </span>
+
+                  <span className="usage-breakdown-subtitle">
+                    Compare tokens and spend across AI models.
+                  </span>
+                </div>
+              </div>
+
+              <svg
+                className="usage-chevron"
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </summary>
+
+            <div className="usage-breakdown-body">
+              <div className="usage-filter">
+                <label htmlFor="usage-model-filter">
+                  Model
+                </label>
+
+                <select
+                  id="usage-model-filter"
+                  className="usage-select"
+                >
+                  <option value="">
+                    All models
+                  </option>
+                </select>
+              </div>
+
+              <div
+                id="usage-by-model"
+                className="usage-breakdown-table"
+              />
+            </div>
+          </details>
+
+          {/* BY PROJECT */}
+          <details
+            className="usage-breakdown-card"
+            open
+          >
+            <summary>
+              <div className="usage-breakdown-heading">
+                <div className="usage-section-icon emerald">
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="17"
+                    height="17"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  </svg>
+                </div>
+
+                <div>
+                  <span className="usage-breakdown-title">
+                    By project
+                  </span>
+
+                  <span className="usage-breakdown-subtitle">
+                    See which projects are driving AI usage.
+                  </span>
+                </div>
+              </div>
+
+              <svg
+                className="usage-chevron"
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </summary>
+
+            <div className="usage-breakdown-body">
+              <div className="usage-filter">
+                <label htmlFor="usage-project-filter">
+                  Project
+                </label>
+
+                <select
+                  id="usage-project-filter"
+                  className="usage-select"
+                >
+                  <option value="">
+                    All projects
+                  </option>
+                </select>
+              </div>
+
+              <div
+                id="usage-by-project"
+                className="usage-breakdown-table"
+              />
+            </div>
+          </details>
+        </div>
       </div>
     </section>
   );
