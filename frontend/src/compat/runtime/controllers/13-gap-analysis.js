@@ -268,14 +268,59 @@ window.openGapPrRun = async (rid) => {
     const TYPE_ORDER = ["functional", "e2e", "api", "ui", "nfr", "other"];
 
     const headerLinks = [];
-    if (r.pr_url)
-      headerLinks.push(
-        `<a class="ghost" target="_blank" rel="noopener" href="${esc(r.pr_url)}">Open PR ↗</a>`,
-      );
-    if (r.commit_url)
-      headerLinks.push(
-        `<a class="ghost" target="_blank" rel="noopener" href="${esc(r.commit_url)}">View commit ↗</a>`,
-      );
+
+    if (r.pr_url) {
+      headerLinks.push(`
+    <a
+      class="run-link-btn run-link-primary"
+      target="_blank"
+      rel="noopener"
+      href="${esc(r.pr_url)}"
+      title="Open pull request"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 3v12"></path>
+        <circle cx="7" cy="18" r="2"></circle>
+        <circle cx="7" cy="5" r="2"></circle>
+
+        <path d="M17 6h4v4"></path>
+        <path d="m21 6-6 6"></path>
+      </svg>
+
+      <span>Open PR</span>
+    </a>
+  `);
+    }
+
+    if (r.commit_url) {
+      headerLinks.push(`
+    <a
+      class="run-link-btn run-link-secondary"
+      target="_blank"
+      rel="noopener"
+      href="${esc(r.commit_url)}"
+      title="View commit"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M3 12h6"></path>
+        <path d="M15 12h6"></path>
+      </svg>
+
+      <span>View commit</span>
+
+      <svg
+        class="run-link-external"
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+      >
+        <path d="M14 5h5v5"></path>
+        <path d="M19 5l-8 8"></path>
+        <path d="M18 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"></path>
+      </svg>
+    </a>
+  `);
+    }
     if (r.head_sha)
       headerLinks.push(
         `<span class="muted" style="font-size:11px">SHA <code>${esc(r.head_sha.slice(0, 7))}</code></span>`,
@@ -822,4 +867,3 @@ window.resetScanStatus = async (rid) => {
     toast(e.message, true);
   }
 };
-

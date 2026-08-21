@@ -975,12 +975,96 @@ window.openFeature = async (fid) => {
     <div class="muted">${esc(featureMeta)}</div>
     <div class="feature-summary">${esc(summaryText)}</div>
     <div class="feature-stats">${overviewStats}</div>
+
     <div class="feature-action-grid">
-      <button class="feature-action" onclick="showAndScrollToTestCases()"><b>Test cases</b><span>Review, filter, execute, and edit ${f.test_cases.length} cases.</span></button>
-      <button class="feature-action" onclick="navigateTo('validator')"><b>Validator</b><span>Check requirement clarity and missing decisions.</span></button>
-      <button class="feature-action" onclick="navigateTo('testplan')"><b>Test plan</b><span>Create the QA strategy and exportable plan.</span></button>
-      <button class="feature-action" onclick="navigateTo('gap')"><b>Gap Analysis</b><span>PR code coverage and automation coverage with exact commit links.</span></button>
+
+  <button
+    type="button"
+    class="feature-action feature-action-cases"
+    onclick="showAndScrollToTestCases()"
+  >
+   
+
+    <div class="feature-action-content">
+      <b>Test cases</b>
+      <span>
+        Review, filter, execute, and edit ${f.test_cases.length} cases.
+      </span>
     </div>
+
+    <div class="feature-action-meta">
+      <span>${f.test_cases.length} cases</span>
+      <span>Open library</span>
+    </div>
+  </button>
+
+
+  <button
+    type="button"
+    class="feature-action feature-action-validator"
+    onclick="navigateTo('validator')"
+  >
+  
+
+    <div class="feature-action-content">
+      <b>Validator</b>
+      <span>
+        Check requirement clarity and identify missing decisions.
+      </span>
+    </div>
+
+    <div class="feature-action-meta">
+      <span>Requirements</span>
+      <span>Review</span>
+    </div>
+  </button>
+
+
+  <button
+    type="button"
+    class="feature-action feature-action-plan"
+    onclick="navigateTo('testplan')"
+  >
+   
+
+    <div class="feature-action-content">
+      <b>Test plan</b>
+      <span>
+        Build the QA strategy and generate an exportable test plan.
+      </span>
+    </div>
+
+    <div class="feature-action-meta">
+      <span>QA strategy</span>
+      <span>Generate</span>
+    </div>
+  </button>
+
+
+  <button
+    type="button"
+    class="feature-action feature-action-gap"
+    onclick="navigateTo('gap')"
+  >
+  
+
+    <div class="feature-action-content">
+      <b>Gap Analysis</b>
+      <span>
+        Inspect code and automation coverage with exact commit links.
+      </span>
+    </div>
+
+    <div class="feature-action-meta">
+      <span>Coverage</span>
+      <span>Analyze</span>
+    </div>
+  </button>
+
+</div>
+
+
+
   </div>`;
     const h = groups
       .map(([t, label, help], index) => {

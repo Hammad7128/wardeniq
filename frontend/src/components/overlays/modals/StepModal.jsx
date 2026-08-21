@@ -1,37 +1,169 @@
+import "./modal css/step-modal.css";
+
 /** Shared step-modal overlay. */
 export default function StepModal() {
   return (
-    <div className="modal" id="step-modal">
-      <div className="box editor-box" style={{ maxWidth: "500px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-          <h2 id="step-modal-heading" style={{ margin: "0", fontSize: "16px" }}>Create Step</h2>
-          <button className="ghost" id="step-modal-close" type="button" style={{ padding: "4px 8px", fontSize: "16px" }}>×</button>
+    <div
+      className="modal step-modal-overlay"
+      id="step-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="step-modal-heading"
+    >
+      <div className="step-modal-dialog">
+        {/* Header */}
+        <div className="step-modal-header">
+          <div>
+            <span className="step-modal-eyebrow">
+              STEP LIBRARY
+            </span>
+
+            <h2 id="step-modal-heading">
+              Create Step
+            </h2>
+
+            <p>
+              Create a reusable step for your test cases.
+            </p>
+          </div>
+
+          <button
+            id="step-modal-close"
+            type="button"
+            className="step-modal-close"
+            title="Close"
+            aria-label="Close modal"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="17"
+              height="17"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-          <div>
-            <label>Step Type / Prefix</label>
-            <select id="step-modal-prefix" style={{ width: "100%" }}>
-              <option value="Given">Given</option>
-              <option value="When">When</option>
-              <option value="Then">Then</option>
-              <option value="And">And</option>
-              <option value="But">But</option>
-              <option value="">None / Custom</option>
-            </select>
+
+        {/* Form */}
+        <div className="step-modal-body">
+          {/* Step type */}
+          <div className="step-modal-field">
+            <div className="step-modal-label-row">
+              <label htmlFor="step-modal-prefix">
+                Step type
+              </label>
+
+              <span>Optional prefix</span>
+            </div>
+
+            <div className="step-modal-select-wrap">
+              <select id="step-modal-prefix">
+                <option value="Given">Given</option>
+                <option value="When">When</option>
+                <option value="Then">Then</option>
+                <option value="And">And</option>
+                <option value="But">But</option>
+                <option value="">
+                  None / Custom
+                </option>
+              </select>
+
+              <svg
+                className="step-modal-select-icon"
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </div>
           </div>
-          <div>
-            <label>Action / Description</label>
-            <textarea id="step-modal-action" placeholder="e.g. user is on login page" style={{ width: "100%", height: "70px", fontFamily: "inherit", fontSize: "13px", padding: "8px" }} required></textarea>
+
+          {/* Action */}
+          <div className="step-modal-field">
+            <div className="step-modal-label-row">
+              <label htmlFor="step-modal-action">
+                Action / Description
+              </label>
+
+              <span>Required</span>
+            </div>
+
+            <textarea
+              id="step-modal-action"
+              placeholder="e.g. user is on the login page"
+              required
+            />
           </div>
-          <div>
-            <label>Expected Result</label>
-            <textarea id="step-modal-expected" placeholder="e.g. login form is displayed" style={{ width: "100%", height: "70px", fontFamily: "inherit", fontSize: "13px", padding: "8px" }}></textarea>
+
+          {/* Expected result */}
+          <div className="step-modal-field">
+            <div className="step-modal-label-row">
+              <label htmlFor="step-modal-expected">
+                Expected result
+              </label>
+
+              <span>Optional</span>
+            </div>
+
+            <textarea
+              id="step-modal-expected"
+              placeholder="e.g. login form is displayed"
+            />
           </div>
-          <div id="step-modal-warn" style={{ fontSize: "12px", color: "var(--amber)", marginTop: "4px", display: "none" }}></div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
-            <button className="ghost" id="step-modal-cancel" type="button">Cancel</button>
-            <button className="go" id="step-modal-save" type="button">Save</button>
-          </div>
+
+          {/* Warning */}
+          <div
+            id="step-modal-warn"
+            className="step-modal-warning"
+            style={{ display: "none" }}
+          />
+        </div>
+
+        {/* Footer */}
+        <div className="step-modal-footer">
+          <button
+            id="step-modal-cancel"
+            type="button"
+            className="step-modal-cancel"
+          >
+            Cancel
+          </button>
+
+          <button
+            id="step-modal-save"
+            type="button"
+            className="step-modal-save"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m5 12 4 4L19 6" />
+            </svg>
+
+            <span>Save step</span>
+          </button>
         </div>
       </div>
     </div>
