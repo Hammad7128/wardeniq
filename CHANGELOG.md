@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Fixed
+- **A saved Jira (or LLM/SMTP) integration could silently disappear later, with
+  no error at save time and no sign-out in between.** `app/store/base.py`
+  connected to MongoDB with pymongo's default write concern (`w=1`,
+  acknowledged by the primary only). On the bundled 3-node replica set, a
+  routine primary election shortly after a `/api/settings` save (a container
+  restart, a brief network blip, a laptop suspending mid-session) rolls back
+  any write that reached the old primary but hadn't yet replicated when it
+  stepped down — even though the client already got back `200 OK`. Since
+  Jira/LLM/SMTP credentials are saved once and read much later (e.g. "Create
+  Feature"'s Jira epic picker), this showed up as "the config isn't there
+  anymore," fixable only by re-opening Settings and saving again (which
+  happened to catch a stable primary). User sessions were unaffected, since
+  they're looked up from user documents written well before the rollback
+  window, which is why the symptom tracked with a browser restart rather than
+  a sign-out. `BaseStore.__init__` now runs every Mongo URI (bundled default or
+  bring-your-own) through `_with_durable_write_concern`, which adds
+  `w=majority&retryWrites=true` unless the URI already specifies its own —
+  making a save durable across a primary failover instead of appearing to
+  succeed and quietly reverting.
+
 ### Security
 - **Stronger encryption-key derivation for secrets at rest.** `app/crypto.py` now
   derives the Fernet key from `ENCRYPTION_KEY`/`APP_SECRET` with PBKDF2-HMAC-SHA256

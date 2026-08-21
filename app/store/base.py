@@ -13,6 +13,7 @@ path reports through this one gate).
 import math
 import os
 import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from bson import ObjectId
 from pymongo import MongoClient
@@ -21,6 +22,37 @@ from pymongo.operations import SearchIndexModel
 
 VECTOR_INDEX = "vector_index"
 TEXT_INDEX = "text_index"
+
+
+def _with_durable_write_concern(uri: str) -> str:
+    """Opt into a majority write concern (and retryWrites) unless the URI already
+    picks its own.
+
+    pymongo's un-annotated default is w=1 -- acknowledged by the primary alone. If
+    that primary steps down (routine election, container restart, a laptop
+    suspending mid-session) before the write replicates, the write is rolled back
+    when it rejoins as secondary. Nothing surfaces this to the user: the original
+    PUT already returned 200. A Jira/LLM/SMTP settings save is exactly the write
+    this bites hardest -- it happens once, isn't re-read for a while, and when it's
+    gone the symptom looks like "the browser session forgot it" rather than "the
+    database rolled back an ack'd write".
+
+    Only fills in what's missing so an operator's own explicit w=/retryWrites=
+    choice (e.g. a single-node dev Mongo, where majority reduces to 1 anyway) is
+    never overridden. Best-effort: any parse failure returns the URI unchanged
+    rather than block startup over connection-string cosmetics.
+    """
+    try:
+        parts = urlsplit(uri)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        if not any(k.lower() == "w" for k in query):
+            query["w"] = "majority"
+        if not any(k.lower() == "retrywrites" for k in query):
+            query["retryWrites"] = "true"
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    except Exception:  # noqa: BLE001
+        return uri
+
 
 # Safety cap for the EXACT numpy fallback. numpy loads every vector into app RAM
 # and scans linearly, so on a large store (mongot down / index rebuilding) it would
@@ -39,7 +71,7 @@ def cosine_atlas(a, b) -> float:
 
 class BaseStore:
     def __init__(self, uri: str, db_name: str, dim: int):
-        self.client = MongoClient(uri)
+        self.client = MongoClient(_with_durable_write_concern(uri))
         self.db = self.client[db_name]
         self.dim = dim
         self.projects = self.db["projects"]
