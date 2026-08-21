@@ -305,39 +305,95 @@ $("#invite-decline").onclick = async () => {
 // without a manual refresh. Called on window focus and on a light poll.
 let _refreshingMe = false;
 async function refreshMe() {
-  if (_refreshingMe || !ME) return; // only while signed in
+  if (_refreshingMe || !ME) return;
+
   _refreshingMe = true;
+
   try {
-    const r = await fetch("/api/auth/me");
+    const r = await fetch("/api/auth/me", {
+      method: "GET",
+
+      // Explicitly make sure the session cookie is sent.
+      credentials: "include",
+
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
     if (r.status === 401) {
-      // session invalidated (role change / disabled)
+      console.warn(
+        "[Auth] /api/auth/me returned 401. Session cookie may be missing or invalid.",
+      );
+
       ME = null;
+
       showLogin();
-      if (typeof toast === "function")
-        toast("Your access changed — please sign in again.", true);
+
+      if (typeof toast === "function") {
+        toast(
+          "Your session ended — please sign in again.",
+          true,
+        );
+      }
+
       return;
     }
-    if (!r.ok) return;
+
+    if (!r.ok) {
+      console.warn(
+        `[Auth] Identity refresh failed with status ${r.status}`,
+      );
+
+      // Don't log the user out for temporary server errors.
+      return;
+    }
+
     const j = await r.json();
-    const prevRole = ME && ME.role;
+
+    if (!j?.user) {
+      console.warn(
+        "[Auth] /api/auth/me did not return a user.",
+      );
+
+      return;
+    }
+
+    const prevRole = ME?.role;
+
     ME = j.user;
-    if (ME && ME.role !== prevRole) {
+
+    if (ME.role !== prevRole) {
       applyRole();
-      if (typeof toast === "function") toast(`Your role is now "${ME.role}".`);
-      // If the current view is no longer permitted for the new role, fall back home.
-      const adminOnly = ["users", "config"];
-      if (ME.role !== "admin" && adminOnly.includes(currentViewName)) {
+
+      if (typeof toast === "function") {
+        toast(`Your role is now "${ME.role}".`);
+      }
+
+      const adminOnly = [
+        "users",
+        "config",
+      ];
+
+      if (
+        ME.role !== "admin" &&
+        adminOnly.includes(currentViewName)
+      ) {
         try {
           navigateTo("dashboard");
         } catch (e) {}
       } else {
         try {
           navigateTo(currentViewName);
-        } catch (e) {} // re-render with new permissions
+        } catch (e) {}
       }
     }
   } catch (e) {
-    /* transient network — ignore */
+    // Network failure should NOT destroy the current session.
+    console.warn(
+      "[Auth] Unable to refresh session:",
+      e,
+    );
   } finally {
     _refreshingMe = false;
   }
@@ -411,13 +467,64 @@ $("#login-verify").onclick = async () => {
       body: JSON.stringify({ email, code }),
     });
     ME = r.user;
-    $("#login").hidden = true;
-    applyRole();
-    try {
-      sessionStorage.removeItem("wq_invite_token");
-    } catch (e) {}
-    if (await maybeShowInvite()) return; // gate on a pending invite before entering
-    startApp();
+
+/**
+ * OTP verification returned a user,
+ * but now confirm that the HTTP-only session cookie
+ * was actually stored and can be used.
+ */
+try {
+  const meResponse = await fetch(
+    "/api/auth/me",
+    {
+      credentials: "include",
+    },
+  );
+
+  if (!meResponse.ok) {
+    throw new Error(
+      "Session cookie was not created correctly.",
+    );
+  }
+
+  const meData = await meResponse.json();
+
+  if (!meData?.user) {
+    throw new Error(
+      "Authenticated user could not be restored.",
+    );
+  }
+
+  ME = meData.user;
+} catch (sessionError) {
+  console.error(
+    "[Auth] OTP succeeded but session validation failed:",
+    sessionError,
+  );
+
+  ME = null;
+
+  showLogin();
+
+  $("#login-err").textContent =
+    "Your code was accepted, but the login session could not be saved. Please clear localhost cookies and try again.";
+
+  return;
+}
+
+$("#login").hidden = true;
+
+applyRole();
+
+try {
+  sessionStorage.removeItem(
+    "wq_invite_token",
+  );
+} catch (e) {}
+
+if (await maybeShowInvite()) return;
+
+startApp();
   } catch (e) {
     $("#login-err").textContent = e.message;
   } finally {
