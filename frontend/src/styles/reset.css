@@ -1,4 +1,0 @@
-/* Extra resets that live outside the ported legacy stylesheet so we can layer
-   new conventions on top without editing 900+ lines of visual rules. */
-html, body, #root { height: 100%; }
-body { overflow-x: hidden; }
