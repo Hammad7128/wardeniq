@@ -439,7 +439,13 @@ $("#login-send").onclick = async () => {
       }
     } else {
       $("#login-sent-text").textContent = "We emailed a 6-digit code to ";
-      $("#login-msg").textContent = "Code sent — check your email.";
+      // The backend can't always tell us a code actually reached an inbox — for an
+      // unrecognized/deactivated/rate-limited email it deliberately returns the same
+      // {sent:true} shape (so this screen can't be used to enumerate accounts), but
+      // now includes an honest, non-committal `message` for that case instead of
+      // nothing. Prefer it over the hardcoded "Code sent" text, which used to claim
+      // delivery even when none was attempted.
+      $("#login-msg").textContent = r.message || "Code sent — check your email.";
     }
     clearLoginCode();
     setTimeout(focusLoginCode, 50);

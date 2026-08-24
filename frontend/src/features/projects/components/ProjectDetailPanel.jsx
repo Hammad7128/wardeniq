@@ -52,10 +52,27 @@ export default function ProjectDetailPanel() {
             </div>
           </div>
           <div style={{ display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap" }}>
-            <div style={{ flex: "2", minWidth: "220px" }}>
+            <div style={{ flex: "2", minWidth: "220px", position: "relative" }} data-repo-suggest-wrap>
               <label>Repository URL or Owner/Name</label>
-              <input id="repo-url" placeholder="https://github.com/org/backend-api" list="myrepos" />
-              <datalist id="myrepos"></datalist>
+              <input id="repo-url" placeholder="https://github.com/org/backend-api" autoComplete="off" />
+              <div
+                id="repo-url-suggest"
+                hidden
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  right: 0,
+                  zIndex: 50,
+                  maxHeight: "220px",
+                  overflow: "auto",
+                  background: "#0d151f",
+                  border: "1px solid var(--line)",
+                  borderRadius: "8px",
+                  marginTop: "4px",
+                  boxShadow: "0 8px 20px rgba(0,0,0,.35)",
+                }}
+              ></div>
             </div>
             <div style={{ width: "115px" }}>
               <label>Type</label>

@@ -714,6 +714,11 @@ window.deleteProjectFromCard = async (pid) => {
 
 // Project-detail provider toggle + PAT management
 let PD_PROVIDER = "github";
+// Repos fetched via "Load my repositories" for the Connect-repository box
+// below. Kept in memory and never mutated by selection/filtering, so picking
+// one repo doesn't shrink what's offered the next time the suggestion panel
+// reopens — see renderRepoSuggest().
+let REPO_PICK_CACHE = [];
 document.querySelectorAll("[data-pd-provider]").forEach((btn) => {
   btn.onclick = async () => {
     PD_PROVIDER = btn.dataset.pdProvider;
@@ -820,6 +825,72 @@ if ($("#repo-add"))
     }
   };
 
+// Renders the "Connect repository" suggestion panel from REPO_PICK_CACHE,
+// filtered by `q` (case-insensitive substring match on full_name). The
+// filter only ever reads REPO_PICK_CACHE — it's never trimmed or replaced —
+// so calling this with an empty `q` (which onfocus/onclick below always do)
+// shows the COMPLETE loaded list again, regardless of whatever value is
+// currently sitting in the input from a prior selection. That's the bug fix:
+// previously this box was a native <input list="myrepos"> + <datalist>,
+// and browsers filter datalist suggestions against the input's current
+// value — so after picking a repo, reopening only offered entries matching
+// that exact text (usually just itself).
+function renderRepoSuggest(q) {
+  const box = $("#repo-url-suggest");
+  if (!box) return;
+  if (!REPO_PICK_CACHE.length) {
+    box.hidden = true;
+    return;
+  }
+  const ql = (q || "").trim().toLowerCase();
+  const matches = REPO_PICK_CACHE.filter(
+    (x) => !ql || (x.full_name || "").toLowerCase().includes(ql),
+  );
+  if (!matches.length) {
+    box.innerHTML = `<div class="muted" style="padding:8px 10px;font-size:12px">No matches.</div>`;
+    box.hidden = false;
+    return;
+  }
+  box.innerHTML = matches
+    .slice(0, 200)
+    .map(
+      (x) =>
+        `<div class="repo-suggest-row" data-full-name="${esc(x.full_name)}" style="padding:7px 10px;font-size:12.5px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid rgba(255,255,255,.04)">
+       <span>${esc(x.full_name)}</span>
+       <span class="muted" style="font-size:11px;white-space:nowrap">${x.private ? "private" : "public"}${x.language ? " · " + esc(x.language) : ""}</span>
+     </div>`,
+    )
+    .join("");
+  box.hidden = false;
+}
+// mousedown (not click) fires before the input's blur, so picking a row
+// registers before the panel would otherwise close out from under it.
+document.addEventListener("mousedown", (e) => {
+  const row = e.target.closest(".repo-suggest-row");
+  if (row) {
+    if ($("#repo-url")) $("#repo-url").value = row.dataset.fullName;
+    if ($("#repo-url-suggest")) $("#repo-url-suggest").hidden = true;
+    return;
+  }
+  if (!e.target.closest("[data-repo-suggest-wrap]") && $("#repo-url-suggest"))
+    $("#repo-url-suggest").hidden = true;
+});
+document.addEventListener("keydown", (e) => {
+  if (
+    e.key === "Escape" &&
+    $("#repo-url-suggest") &&
+    !$("#repo-url-suggest").hidden
+  )
+    $("#repo-url-suggest").hidden = true;
+});
+if ($("#repo-url")) {
+  $("#repo-url").oninput = (e) => renderRepoSuggest(e.target.value);
+  // Reopening (focus or click) always re-shows the complete cached list —
+  // see renderRepoSuggest()'s comment above for why this is the actual fix.
+  $("#repo-url").onfocus = () => renderRepoSuggest("");
+  $("#repo-url").onclick = () => renderRepoSuggest("");
+}
+
 if ($("#repo-pick"))
   $("#repo-pick").onclick = async () => {
     if (!currentProject) return;
@@ -829,14 +900,10 @@ if ($("#repo-pick"))
           ? `/api/projects/${currentProject}/gitlab/accessible-repos?page=1`
           : `/api/projects/${currentProject}/github/accessible-repos?page=1`;
       const r = await api(url);
-      $("#myrepos").innerHTML = (r.repos || [])
-        .map(
-          (x) =>
-            `<option value="${esc(x.full_name)}">${x.private ? "private" : "public"}${x.language ? " · " + esc(x.language) : ""}</option>`,
-        )
-        .join("");
+      REPO_PICK_CACHE = r.repos || [];
+      renderRepoSuggest("");
       toast(
-        `${(r.repos || []).length} repos loaded — type in the box to filter`,
+        `${REPO_PICK_CACHE.length} repos loaded — click the box to browse, or type to filter`,
       );
     } catch (e) {
       toast(e.message, true);
