@@ -90,6 +90,16 @@ def _deliver_reset_code(target_name: str, email: str, code: str):
         return "no_email", "User has no valid email address configured"
 
 
+# Shown for every "nothing was actually attempted" outcome of request_otp() below
+# (unknown email, deactivated account, rate-limited) so the sign-in screen never
+# claims a code was sent when none was. Wording deliberately mirrors the existing
+# anti-enumeration message in request_password_reset() ("If an account exists...")
+# a few lines below in this file: it neither confirms nor denies the account
+# exists, which is the whole point of masking these cases in the first place —
+# but unlike the OTP path before this fix, it no longer *asserts* delivery either.
+OTP_MASKED_MESSAGE = "If an account exists for this email, a sign-in code has been sent. Check your inbox."
+
+
 @router.post("/api/auth/request-otp")
 def request_otp(body: OtpRequestIn):
     email = (body.email or "").strip().lower()
@@ -103,16 +113,23 @@ def request_otp(body: OtpRequestIn):
         if not has_real_users:
             user = store.create_user(email, email.split("@")[0], "admin"); bootstrap = True
         else:
-            # Don't reveal whether an account exists.
-            return {"sent": True}
+            # Don't reveal whether an account exists. No email is ever attempted on
+            # this branch, so the response must say so honestly (OTP_MASKED_MESSAGE)
+            # instead of the confident "Code sent" text used for a real send —
+            # returning that here is exactly the false-positive success message QA
+            # reported, for the extremely common case of testing with an email that
+            # isn't (yet) a registered account.
+            return {"sent": True, "message": OTP_MASKED_MESSAGE}
     if not user.get("active"):
-        return {"sent": True}
-    # Rate-limit code issuance per account. Return the generic {"sent": True} on limit
-    # so we don't reveal that the account exists or is being targeted.
+        return {"sent": True, "message": OTP_MASKED_MESSAGE}
+    # Rate-limit code issuance per account. Return the generic masked response on
+    # limit so we don't reveal that the account exists or is being targeted — and,
+    # as above, no email is sent for this request, so the message must not claim
+    # one was.
     if store.otp_recent_issue_count(user["id"], OTP_WINDOW_SECONDS) > OTP_MAX_PER_WINDOW:
         print(f"[wardenIQ][OTP throttled] {email} exceeded "
               f"{OTP_MAX_PER_WINDOW}/{OTP_WINDOW_SECONDS}s", flush=True)
-        return {"sent": True}
+        return {"sent": True, "message": OTP_MASKED_MESSAGE}
     code = auth.gen_otp()
     store.set_otp(user["id"], auth.hash_otp(code), time.time() + auth.OTP_TTL)
     mode, detail = _deliver_otp(email, code, user.get("name") or email.split("@")[0],
@@ -123,7 +140,8 @@ def request_otp(body: OtpRequestIn):
     # delivery: "email" (SMTP) or "log" (demo/dev mode — no SMTP configured, code
     # is printed to the server log AND returned in `dev_code` for the sign-in UI).
     resp = {"sent": True, "bootstrap": bootstrap,
-            "delivery": "log" if mode == "logged" else "email"}
+            "delivery": "log" if mode == "logged" else "email",
+            "message": "Code sent. Check your inbox."}
     if mode == "logged":
         # `detail` holds the plaintext code in this mode (see _deliver_otp).
         resp["dev_code"] = detail

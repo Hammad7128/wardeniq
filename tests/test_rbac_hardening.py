@@ -83,7 +83,12 @@ class TestOtpThrottle:
         auth_routes.request_otp(body)
         assert state["otp_set"] == 2
         r = auth_routes.request_otp(body)          # count 3 > limit 2
-        assert r == {"sent": True} and state["otp_set"] == 2
+        # Same generic {"sent": true} as before (still no signal to an attacker
+        # that throttling kicked in), now with the honest, equally-generic
+        # `message` added for the OTP-success-message fix — no delivery was
+        # attempted for this throttled request, so the text must not claim one.
+        assert r == {"sent": True, "message": auth_routes.OTP_MASKED_MESSAGE}
+        assert state["otp_set"] == 2
 
 
 class TestAudit:

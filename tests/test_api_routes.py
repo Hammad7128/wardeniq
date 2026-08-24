@@ -67,7 +67,12 @@ def test_request_otp_rejects_invalid_email():
 
 def test_request_otp_does_not_reveal_existing_accounts(monkeypatch):
     # A second, unknown requester when real users already exist gets the same
-    # generic {"sent": true} — the route must not leak account existence.
+    # generic {"sent": true} — the route must not leak account existence. It now
+    # also carries an honest, equally-generic `message` (fix for "success message
+    # shown but no OTP email received" — see test_otp_success_message.py): no
+    # email is ever attempted on this branch, so the response must say so rather
+    # than implying delivery, while still not confirming/denying the account
+    # exists.
     monkeypatch.setattr(main.store, "get_user_by_email", lambda email: None)
     monkeypatch.setattr(
         main.store, "list_users",
@@ -75,7 +80,10 @@ def test_request_otp_does_not_reveal_existing_accounts(monkeypatch):
     )
     r = client.post("/api/auth/request-otp", json={"email": "nobody@example.com"})
     assert r.status_code == 200
-    assert r.json() == {"sent": True}
+    assert r.json() == {
+        "sent": True,
+        "message": main._auth_routes.OTP_MASKED_MESSAGE,
+    }
 
 
 def test_request_otp_bootstraps_first_admin(monkeypatch):

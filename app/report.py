@@ -117,9 +117,18 @@ def build_cycle_pdf(cycle: dict) -> bytes:
             str(it.get("display_order") or ""),
             Paragraph(_e(it.get("display_id") or it.get("case_id") or ""), cell),
             Paragraph(_e(it.get("title") or ""), cell),
-            _e(_type_label(it.get("category") or "")),
-            _e(prio),
-            _e(_status_label(it.get("execution_status") or "")),
+            # Category/Priority/Status must be Paragraphs, not plain strings: reportlab
+            # only wraps/clips Flowable cell content to the column width. A plain string
+            # longer than its column (e.g. "Business / Functional" or "Edge &
+            # Reliability" in the 24mm Category column) gets drawn past the column's
+            # right edge instead of wrapping -- overlapping the Priority column's own
+            # text so badly the two literally interleave into unreadable glyph soup
+            # (reproduced: "Functional" + "High" rendered as "FunctionHailgh"). Short
+            # labels like "API" happened to fit, which is why this wasn't caught for
+            # every category -- only the longer ones QA reported.
+            Paragraph(_e(_type_label(it.get("category") or "")), cell),
+            Paragraph(_e(prio), cell),
+            Paragraph(_e(_status_label(it.get("execution_status") or "")), cell),
         ])
     table = Table(rows, colWidths=[9 * mm, 26 * mm, 73 * mm, 24 * mm, 20 * mm, 22 * mm], repeatRows=1)
     table.setStyle(TableStyle([
