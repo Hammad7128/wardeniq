@@ -3,6 +3,14 @@
 // sign-in lands on Configuration. This is a soft redirect only — the user is free to
 // navigate anywhere else; nothing is locked.
 async function needsConfig() {
+  // GET /api/settings is admin-only (core/security.py ADMIN_PATHS). Configuration
+  // is itself an admin-only page (its nav entry is hidden for everyone else — see
+  // applyRole()'s `nav button[data-admin]` gating), so this first-run redirect is
+  // only ever actionable by an admin anyway. Skipping the call for every other role
+  // avoids a 403 the `api()` helper turns into a "Not allowed" toast on every single
+  // page load/refresh -- previously fired for every Editor/Viewer, unconditionally,
+  // even though the app went on to load their view normally right after.
+  if (!(ME && ME.role === "admin")) return false;
   try {
     const s = await api("/api/settings");
     return !s.configured;

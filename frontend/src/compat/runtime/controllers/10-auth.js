@@ -1,4 +1,19 @@
 // ---- auth / login ----
+// One retry (250ms backoff) before giving up on the SMTP-status check --
+// smooths over a transient blip (e.g. right after a fresh logout, when this
+// runs again immediately) instead of immediately guessing which login method
+// to show. Returns null (never throws) on total failure so showLogin() has
+// one shape to branch on.
+async function _smtpStatusWithRetry() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await api("/api/auth/smtp-status");
+    } catch (e) {
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  return null;
+}
 async function showLogin() {
   ME = null;
   $("#login").hidden = false;
@@ -6,30 +21,35 @@ async function showLogin() {
   $("#login-err").textContent = "";
   $("#login-msg").textContent = "";
   clearLoginCode();
-  try {
-    const status = await api("/api/auth/smtp-status");
-    if (status && status.smtp_setup) {
-      $("#login-intro").textContent =
-        "Sign in with a one-time code sent to your email. No password needed.";
-      $("#login-step1").hidden = false;
-      $("#login-step2").hidden = true;
-      $("#login-password").hidden = true;
-      setTimeout(() => $("#login-email")?.focus(), 50);
-    } else {
-      $("#login-intro").textContent =
-        "Sign in with your admin credentials. (SMTP is not configured)";
-      $("#login-step1").hidden = true;
-      $("#login-step2").hidden = true;
-      $("#login-password").hidden = false;
-      setTimeout(() => $("#login-username")?.focus(), 50);
-    }
-  } catch (e) {
+  const status = await _smtpStatusWithRetry();
+  if (status && status.smtp_setup) {
     $("#login-intro").textContent =
       "Sign in with a one-time code sent to your email. No password needed.";
     $("#login-step1").hidden = false;
     $("#login-step2").hidden = true;
     $("#login-password").hidden = true;
     setTimeout(() => $("#login-email")?.focus(), 50);
+  } else {
+    // Safe default whenever smtp-status can't be determined (status is null
+    // after retries) as well as the genuine "SMTP not configured" case: show
+    // password sign-in, not the OTP flow. If SMTP genuinely IS configured,
+    // login-password's own backend check rejects the attempt with a clear,
+    // actionable error ("Password login is disabled because SMTP is
+    // configured..."). Defaulting to OTP instead is the wrong direction --
+    // when SMTP genuinely ISN'T configured (a password-only/local-admin
+    // install), an OTP request still "succeeds" against the API's own
+    // anti-enumeration masking but never delivers anything: a silent dead end
+    // with no error and no way back to password login short of reloading the
+    // page. This is what QA reported as "admin gets redirected to OTP after
+    // logout and can't sign back in with username/password until they clear
+    // browser data" -- clearing data just forces a fresh load that happens to
+    // give the smtp-status check another chance to succeed.
+    $("#login-intro").textContent =
+      "Sign in with your admin credentials. (SMTP is not configured)";
+    $("#login-step1").hidden = true;
+    $("#login-step2").hidden = true;
+    $("#login-password").hidden = false;
+    setTimeout(() => $("#login-username")?.focus(), 50);
   }
 }
 function applyRole() {

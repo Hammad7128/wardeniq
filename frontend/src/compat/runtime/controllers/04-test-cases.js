@@ -583,7 +583,16 @@ async function saveCase(body) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ case_ids: [r.id] }),
           });
-        } catch (e) {}
+        } catch (e) {
+          // The case itself was created fine (message above already reflects
+          // that) -- this second call only links it into the current cycle,
+          // and can legitimately be rejected, e.g. a duplicate-title guard in
+          // add_cycle_items() for the same feature within this cycle. Swallowing
+          // that silently used to leave the user thinking the case landed in
+          // the cycle when it didn't, with no indication anything went wrong.
+          $("#m-msg").innerHTML =
+            `<span class="err">Created${r && r.display_id ? ` — ${esc(r.display_id)}` : ""}, but not added to this cycle: ${esc(e.message)}</span>`;
+        }
       }
     }
     loadCases();

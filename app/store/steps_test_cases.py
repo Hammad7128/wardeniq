@@ -76,10 +76,21 @@ class StepsTestCasesMixin(_Base):
                 {"$match": {"step_ids": {"$in": ids}}},
                 {"$unwind": "$step_ids"},
                 {"$match": {"step_ids": {"$in": ids}}},
-                {"$group": {"_id": "$step_ids", "n": {"$sum": 1}}},
+                # Group on (case, count once) via $addToSet on the case's own _id,
+                # not a raw $sum -- a single test case can legitimately reference
+                # the same shared step more than once in its own step_ids array
+                # (e.g. reusing "click the X button" at step 2 and step 5 of the
+                # same script). $sum after $unwind counts every occurrence, so
+                # that one case alone would inflate a step's count by 1 for each
+                # repeat -- reproduced: a step used by 3 distinct cases, one of
+                # which references it twice, reported "4 cases" in this listing
+                # while the step's own "Used in Cases" detail (a plain find(),
+                # which naturally returns each matching case once) correctly
+                # listed 3. $addToSet dedupes back down to distinct cases.
+                {"$group": {"_id": "$step_ids", "cases": {"$addToSet": "$_id"}}},
             ]
             for row in self.cases.aggregate(pipeline):
-                counts[row["_id"]] = row["n"]
+                counts[row["_id"]] = len(row["cases"])
         out = []
         for s in steps:
             s["id"] = str(s.pop("_id"))

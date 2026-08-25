@@ -44,6 +44,29 @@ from workers.registry import launch_job
 
 router = APIRouter()
 
+
+def _jira_token_status(s: dict) -> tuple[bool, bool, str]:
+    """(has_enc, readable, plaintext) for the stored Jira API token.
+
+    ``crypto.decrypt()`` swallows its own failures and returns "" on a bad
+    token, so a non-empty ``jira_api_token_enc`` that decrypts to "" can only
+    mean the ciphertext can no longer be read under the current
+    ENCRYPTION_KEY/APP_SECRET (e.g. it was rotated, or the value was restored
+    from an older backup) — the exact same ambiguity `_smtp_cfg()` (core/deps.py)
+    already special-cases for the SMTP password. Settings previously treated
+    "has_enc but unreadable" the same as "never set": the placeholder still said
+    "Leave blank to keep current" (driven by has_enc alone), but re-saving with
+    a blank token then resolved to "" and tripped the generic "all required"
+    validation error — confusing, since the fields visibly looked configured.
+    Callers now get all three states explicitly instead of collapsing them.
+    """
+    enc = s.get("jira_api_token_enc", "")
+    if not enc:
+        return False, False, ""
+    plaintext = crypto.decrypt(enc)
+    return True, bool(plaintext), plaintext
+
+
 # Known embedding models per provider (id + native dimension) for the UI. The real
 # dimension is always measured (probe_dim) at switch time, so these are just hints.
 EMBED_MODEL_OPTIONS = {
@@ -90,8 +113,12 @@ def get_settings():
         "jira_base_url": s.get("jira_base_url", ""),
         "jira_email": s.get("jira_email", ""),
         "jira_token_set": bool(s.get("jira_api_token_enc")),
+        # True only when a stored token is present AND still decryptable — see
+        # _jira_token_status(). The UI uses this (not jira_token_set) to decide
+        # whether "Leave blank to keep current" is actually true.
+        "jira_token_readable": _jira_token_status(s)[1],
         "jira_configured": bool(s.get("jira_base_url") and s.get("jira_email")
-                                and s.get("jira_api_token_enc")),
+                                and _jira_token_status(s)[1]),
         "smtp_host": s.get("smtp_host", ""),
         "smtp_port": s.get("smtp_port", ""),
         "smtp_user": s.get("smtp_user", ""),
@@ -163,9 +190,7 @@ def _merged_settings_dict(body: SettingsIn):
         ),
         "jira_base_url": body.jira_base_url.strip() if body.jira_base_url is not None else s.get("jira_base_url", ""),
         "jira_email": body.jira_email.strip() if body.jira_email is not None else s.get("jira_email", ""),
-        "jira_api_token": body.jira_api_token.strip() if (body.jira_api_token is not None and body.jira_api_token.strip() != "") else (
-            crypto.decrypt(s.get("jira_api_token_enc", "")) if s.get("jira_api_token_enc") else ""
-        ),
+        "jira_api_token": body.jira_api_token.strip() if (body.jira_api_token is not None and body.jira_api_token.strip() != "") else _jira_token_status(s)[2],
         "smtp_host": body.smtp_host.strip() if body.smtp_host is not None else s.get("smtp_host", ""),
         "smtp_port": body.smtp_port if body.smtp_port is not None else s.get("smtp_port", ""),
         "smtp_user": body.smtp_user.strip() if body.smtp_user is not None else s.get("smtp_user", ""),
@@ -224,6 +249,20 @@ def put_settings(body: SettingsIn, request: Request):
         jira_values = [merged["jira_base_url"], merged["jira_email"], merged["jira_api_token"]]
         if any(jira_values):
             if not all(jira_values):
+                # A blank submitted token normally means "keep the current one" (merged
+                # above falls back to the stored value) — so landing here with an empty
+                # merged token, while base URL/email ARE present, means there either was
+                # never a token saved, or one WAS saved but can no longer be decrypted
+                # (has_enc True, readable False — e.g. after an ENCRYPTION_KEY/APP_SECRET
+                # change). Those need different messages: the second case isn't "you
+                # forgot to fill in fields you can see are already there", it's "the
+                # token you already entered can't be used anymore, re-enter it".
+                has_enc, readable, _ = _jira_token_status(s)
+                if (body.jira_api_token is None or body.jira_api_token.strip() == "") and has_enc and not readable:
+                    raise HTTPException(status_code=400, detail=(
+                        "Jira validation failed: the saved API token can no longer be "
+                        "decrypted (the app's encryption key may have changed) — please "
+                        "re-enter your Jira API token."))
                 raise HTTPException(status_code=400, detail="Jira validation failed: base URL, email, and API token are all required")
             try:
                 me = jira.Jira(

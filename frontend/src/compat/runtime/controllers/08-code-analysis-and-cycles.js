@@ -1,9 +1,42 @@
 // ---- test cycles + code analysis ----
+// Lookback (days) bounds — kept in sync with the declared min/max on
+// #cyc-days (CodeAnalysisPage.jsx) and with AnalyzeIn's server-side
+// Field(ge=1, le=180) constraint. A bare type="button" click handler with no
+// wrapping <form> never triggers native reportValidity()/checkValidity(), so
+// the input's min/max attributes are cosmetic on their own — the button's
+// disabled state has to be driven explicitly from the current value.
+const CYC_DAYS_MIN = 1;
+const CYC_DAYS_MAX = 180;
+let _cycAnalyzeRunning = false;
+
+function _cycDaysInRange() {
+  const n = parseInt($("#cyc-days") ? $("#cyc-days").value : "", 10);
+  return Number.isFinite(n) && n >= CYC_DAYS_MIN && n <= CYC_DAYS_MAX;
+}
+function _syncAnalyzeButtonState() {
+  const btn = $("#cyc-analyze");
+  if (!btn) return;
+  const inRange = _cycDaysInRange();
+  btn.disabled = _cycAnalyzeRunning || !inRange;
+  // Explain *why* it's disabled via the native hover tooltip rather than an
+  // always-on inline line next to the Lookback field — a persistent line
+  // there broke the controls row's alignment. The title attribute still
+  // works while the button is disabled (hover, not click, drives it).
+  btn.title = !inRange
+    ? `Lookback must be between ${CYC_DAYS_MIN} and ${CYC_DAYS_MAX} days`
+    : _cycAnalyzeRunning
+      ? "Analysis in progress…"
+      : "";
+}
+if ($("#cyc-days")) $("#cyc-days").oninput = _syncAnalyzeButtonState;
+_syncAnalyzeButtonState();
+
 async function initCycles() {
   await loadProjects();
   await loadCycleRepos();
   loadUnmappedPRs();
   loadLatestAnalysis();
+  _syncAnalyzeButtonState();
 }
 $("#cyc-proj").onchange = () => {
   currentProject = $("#cyc-proj").value;
@@ -41,9 +74,16 @@ async function createEmptyCycle() {
     toast("Select a project first", true);
     return;
   }
-  const name =
-    ($("#tcy-name") && $("#tcy-name").value.trim()) ||
-    `Cycle ${new Date().toLocaleDateString()}`;
+  // Previously silently fell back to `Cycle ${date}` when this field was left
+  // blank, so a cycle always got created even with no real name -- and a
+  // second blank click on the same day collided on that identical fallback,
+  // surfacing a confusing "already exists" error instead of the real problem
+  // (no name was given). Require a name up front instead.
+  const name = ($("#tcy-name") && $("#tcy-name").value.trim()) || "";
+  if (!name) {
+    toast("Enter a cycle name", true);
+    return;
+  }
   try {
     const r = await api("/api/test-cycles", {
       method: "POST",
@@ -135,6 +175,15 @@ async function loadUnmappedPRs() {
   }
 }
 $("#cyc-analyze").onclick = async () => {
+  // Defensive re-check: the click handler is the last line of defense even
+  // though the button is kept disabled while out of range (belt-and-
+  // suspenders against a stale/race-y disabled state or a programmatic
+  // click) — analysis must never launch outside the declared bounds.
+  if (!_cycDaysInRange()) {
+    toast(`Lookback must be between ${CYC_DAYS_MIN} and ${CYC_DAYS_MAX} days`, true);
+    _syncAnalyzeButtonState();
+    return;
+  }
   const ids = [...document.querySelectorAll(".cyc-repo-chk")]
     .filter((c) => c.checked)
     .map((c) => c.value);
@@ -149,7 +198,8 @@ $("#cyc-analyze").onclick = async () => {
   $("#cyc-create").style.display = "none";
   $("#cyc-status").textContent =
     `Starting change impact review for ${ids.length} repo${ids.length === 1 ? "" : "s"}…`;
-  $("#cyc-analyze").disabled = true;
+  _cycAnalyzeRunning = true;
+  _syncAnalyzeButtonState();
   try {
     const r = await api("/api/analyze", {
       method: "POST",
@@ -159,7 +209,8 @@ $("#cyc-analyze").onclick = async () => {
     watchAnalyze(r.job_id);
   } catch (e) {
     $("#cyc-status").innerHTML = `<span class="err">${esc(e.message)}</span>`;
-    $("#cyc-analyze").disabled = false;
+    _cycAnalyzeRunning = false;
+    _syncAnalyzeButtonState();
   }
 };
 
@@ -280,7 +331,8 @@ function watchAnalyze(jobId) {
           ? `<span class="err">Analysis failed: ${esc(j.error || "")}</span>`
           : `Review complete · ${a.commit_count || 0} commits · ${(a.changed_files || []).length} files changed${a.note ? ` · ${esc(a.note)}` : ""}`;
     if (j.status === "running") return;
-    $("#cyc-analyze").disabled = false;
+    _cycAnalyzeRunning = false;
+    _syncAnalyzeButtonState();
     renderImpacted(a);
   });
 }
@@ -407,9 +459,13 @@ async function createCycleFromSelection() {
     toast("Select at least one case", true);
     return;
   }
-  const name =
-    ($("#cyc-name") && $("#cyc-name").value.trim()) ||
-    `Cycle ${new Date().toLocaleDateString()}`;
+  // Same "name is required" guard as createEmptyCycle() above -- this flow
+  // had its own separate `Cycle ${date}` fallback for a blank name.
+  const name = ($("#cyc-name") && $("#cyc-name").value.trim()) || "";
+  if (!name) {
+    toast("Enter a cycle name", true);
+    return;
+  }
   const pid = $("#cyc-proj").value || currentProject;
   const repoIds = [...document.querySelectorAll(".cyc-repo-chk")]
     .filter((c) => c.checked)

@@ -23,7 +23,7 @@ import re
 import threading
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import automation as auto_cov
 
@@ -419,7 +419,7 @@ class AnalyzeIn(BaseModel):
     project_id: str
     repo_ids: list[str] = []          # empty → all repos in the project
     branches: dict[str, str] = {}     # {repo_id: branch}; missing → repo's default
-    days: int = 14
+    days: int = Field(14, ge=1, le=180)  # matches the UI's declared Lookback bounds
     feature_id: str | None = None     # optional: scope impact to one feature's cases
 
 

@@ -102,10 +102,13 @@ def update_cycle(cid: str, body: dict, request: Request):
 @router.post("/api/test-cycles/{cid}/items")
 def add_cycle_items(cid: str, body: dict, request: Request):
     user = _current_user(request)
-    count = store.add_cycle_items(
-        cid, (body or {}).get("case_ids") or [],
-        performed_by=(user or {}).get("email"),
-    )
+    try:
+        count = store.add_cycle_items(
+            cid, (body or {}).get("case_ids") or [],
+            performed_by=(user or {}).get("email"),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     return {"added": count, "cycle": store.get_cycle(cid)}
 
 

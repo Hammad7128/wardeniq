@@ -44,9 +44,14 @@ async function loadConfig() {
     if ($("#cfg-jira-base")) {
       $("#cfg-jira-base").value = s.jira_base_url || "";
       $("#cfg-jira-email").value = s.jira_email || "";
-      $("#cfg-jira-status").innerHTML = s.jira_token_set
+      // jira_token_set only means "something is stored" -- it can be a token
+      // that no longer decrypts (e.g. after an app-secret change). Only
+      // jira_token_readable means it's actually usable as-is.
+      $("#cfg-jira-status").innerHTML = s.jira_token_readable
         ? `<span class="ok">Jira token configured</span>`
-        : `<span class="muted">no Jira token set</span>`;
+        : s.jira_token_set
+          ? `<span class="warn">saved token can't be read — re-enter it below</span>`
+          : `<span class="muted">no Jira token set</span>`;
     }
     if ($("#cfg-figma-status")) {
       $("#cfg-figma-status").innerHTML = s.figma_token_set
@@ -135,9 +140,15 @@ async function loadConfig() {
         : "Endpoint URL is required";
     }
     if ($("#cfg-jira-token")) {
-      $("#cfg-jira-token").placeholder = s.jira_token_set
+      // Gate on jira_token_readable, not jira_token_set: a stored-but-
+      // undecryptable token must NOT claim "leave blank to keep current" --
+      // there is no readable current value to keep, and saving with it blank
+      // would just re-trip Jira validation with a confusing error.
+      $("#cfg-jira-token").placeholder = s.jira_token_readable
         ? "Leave blank to keep current"
-        : "API token is required";
+        : s.jira_token_set
+          ? "Saved token can't be read — re-enter it"
+          : "API token is required";
     }
     if ($("#cfg-figma-token")) {
       $("#cfg-figma-token").placeholder = s.figma_token_set
@@ -639,6 +650,14 @@ $("#cfg-jira-save").onclick = async () => {
     $("#cfg-jira-token").placeholder !== "API token is required";
   if (!b.jira_base_url && !b.jira_email && !t && !tokenAlreadySet) {
     toast("Enter Base URL, Email and API token to configure Jira", true);
+    return;
+  }
+  // The stored token exists but can no longer be decrypted (see backend
+  // jira_token_readable) -- leaving it blank here would just re-trip the
+  // server's "all required" validation. Catch it client-side with the same
+  // explanation the placeholder already gave, instead of a generic 400.
+  if (!t && $("#cfg-jira-token").placeholder === "Saved token can't be read — re-enter it") {
+    toast("Your saved Jira API token can no longer be read — re-enter it to save", true);
     return;
   }
   try {

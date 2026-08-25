@@ -68,9 +68,24 @@ class TestCyclesMixin(_Base):
         }
 
     def create_cycle(self, project_id, name, case_ids, source=None, **meta):
+        # A blank/whitespace-only name used to fall through to the frontend's
+        # own client-side fallback (`Cycle ${date}`, one per calling site --
+        # the plain "New cycle" button, "New cycle from selection", and
+        # "New cycle from template" each had their own copy of it). That let a
+        # cycle get created with no real name at all whenever a caller bypassed
+        # or lacked that client-side default (e.g. a direct API call), and made
+        # a second no-name click collide on the exact same date-only fallback
+        # and surface a confusing "already exists" error instead of a plain
+        # "name required" one. Reject it here instead, at the single place all
+        # three creation paths funnel through (create_cycle_from_template()
+        # delegates straight into this method too), rather than trusting every
+        # caller to validate it client-side.
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Cycle name is required")
         duplicate = self.db["test_cycles"].find_one({
             "project_id": project_id,
-            "name_key": name.strip().lower(),
+            "name_key": name.lower(),
         })
         if duplicate:
             raise ValueError("A test cycle with this name already exists in this project")
@@ -81,8 +96,8 @@ class TestCyclesMixin(_Base):
                 items.append(item)
         now = time.time()
         cid = self.db["test_cycles"].insert_one({
-            "project_id": project_id, "name": name.strip(),
-            "name_key": name.strip().lower(), "description": meta.get("description", ""),
+            "project_id": project_id, "name": name,
+            "name_key": name.lower(), "description": meta.get("description", ""),
             "environment": meta.get("environment", ""), "build_version": meta.get("build_version", ""),
             "assigned_to": meta.get("assigned_to"), "scheduled_start_at": meta.get("scheduled_start_at"),
             "scheduled_end_at": meta.get("scheduled_end_at"), "actual_start_at": None,
@@ -227,15 +242,37 @@ class TestCyclesMixin(_Base):
             raise ValueError("Cycle not found")
         existing = {item.get("case_id") for item in c.get("items", [])}
         items = c.get("items", [])
+        # Case-insensitive, trimmed (feature_id, title) pairs already present in
+        # this cycle -- mirrors create_cycle()'s own name-uniqueness check further
+        # down this file. Without this, "Add Test Cases" -> "Create a new test
+        # case" always succeeds even when the new case has the exact same
+        # title/steps/expected-results as one already in this cycle for the same
+        # feature: create_test_case() has no notion of "cycle" at all (its
+        # NewCaseIn schema has no cycle_id field), so it always creates a
+        # brand-new case document with its own case_id -- meaning the
+        # `case_id in existing` check above can never catch this, since a freshly
+        # created duplicate case never shares an id with the case it duplicates.
+        existing_keys = {
+            (item.get("feature_id"), (item.get("title") or "").strip().lower())
+            for item in items
+        }
         added = 0
         for case_id in case_ids:
             if case_id in existing:
                 continue
             item = self._cycle_item_from_case(case_id, len(items) + 1)
-            if item:
-                items.append(item)
-                existing.add(case_id)
-                added += 1
+            if not item:
+                continue
+            key = (item.get("feature_id"), (item.get("title") or "").strip().lower())
+            if key in existing_keys:
+                raise ValueError(
+                    "A test case titled \"%s\" already exists in this cycle for "
+                    "this feature" % item.get("title")
+                )
+            items.append(item)
+            existing.add(case_id)
+            existing_keys.add(key)
+            added += 1
         self.db["test_cycles"].update_one(
             {"_id": ObjectId(cycle_id)},
             {
