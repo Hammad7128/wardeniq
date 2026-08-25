@@ -15,6 +15,7 @@ prevent router-to-router import cycles). `_deliver_otp`, `_deliver_reset_code`,
 in this same file.
 """
 import hmac
+import secrets
 import time
 
 import auth
@@ -33,6 +34,11 @@ from core.security import _current_user
 from core.state import store
 
 router = APIRouter()
+
+# A throwaway hash of a random value, verified on sign-in paths where no real hash
+# exists, so "no such account" / "account has no password" cost the same PBKDF2
+# work as a wrong password and don't leak account existence through response time.
+_DUMMY_PASSWORD_HASH = auth.hash_password(secrets.token_urlsafe(16))
 
 
 def _deliver_otp(email, code, recipient_name="", is_admin=False):
@@ -210,23 +216,38 @@ def login_password(body: LoginPasswordIn, response: Response):
     username = (body.username or "").strip()
     password = body.password or ""
 
-    if username != "admin":
-        raise HTTPException(401, "Invalid username or password")
-
-    user = store.get_user_by_email("admin")
+    # Accept the bootstrap `admin` username OR any account's email address — the
+    # sign-in form is labelled "Username or email", and /api/auth/reset-password
+    # already sets a password on ANY user by email, so restricting sign-in to the
+    # literal "admin" left those users unable to use the password they just set.
+    # get_user_by_email() lowercases/strips, and the bootstrap row's email IS
+    # "admin", so one lookup resolves both forms.
+    user = store.get_user_by_email(username)
     if not user:
         # First boot: no local admin row yet, so only the configured default works
-        # (ADMIN_PASSWORD if the operator set one, else the shipped admin123).
-        if password != DEFAULT_ADMIN_PASSWORD:
+        # (ADMIN_PASSWORD if the operator set one, else the shipped admin123), and
+        # only under the bootstrap username. Verify a dummy hash first so a missing
+        # account costs the same time as a wrong password (no user enumeration).
+        auth.password_matches(_DUMMY_PASSWORD_HASH, password)
+        if username.lower() != "admin" or password != DEFAULT_ADMIN_PASSWORD:
             raise HTTPException(401, "Invalid username or password")
         user = store.create_user("admin", "Admin", "admin")
     else:
         stored_hash = user.get("password_hash")
-        # Once a real password has been set (via ADMIN_PASSWORD seeding or
-        # /api/auth/change-password), it's the only one accepted — the shipped
-        # default stops working so it can't be bypassed with the old admin123.
-        ok = (auth.password_matches(stored_hash, password) if stored_hash
-              else password == DEFAULT_ADMIN_PASSWORD)
+        if stored_hash:
+            # Once a real password has been set (via ADMIN_PASSWORD seeding,
+            # /api/auth/change-password or /api/auth/reset-password), it's the only
+            # one accepted — the shipped default stops working so it can't be
+            # bypassed with the old admin123.
+            ok = auth.password_matches(stored_hash, password)
+        elif user.get("email") == "admin":
+            # Bootstrap admin that has never had a password set.
+            ok = password == DEFAULT_ADMIN_PASSWORD
+        else:
+            # An email account with no password has OTP only: never let an empty
+            # or arbitrary password in through this door.
+            auth.password_matches(_DUMMY_PASSWORD_HASH, password)
+            ok = False
         if not ok:
             raise HTTPException(401, "Invalid username or password")
 
@@ -249,20 +270,27 @@ class ChangePasswordIn(BaseModel):
 
 @router.post("/api/auth/change-password")
 def change_password(body: ChangePasswordIn, request: Request, response: Response):
-    """Self-service password change for the local admin account. Only meaningful for
-    the bootstrap `admin` / admin123 account — email-based accounts sign in with a
-    one-time code and have no password to change. Requires an authenticated session
-    (this route is NOT public — the auth_gateway already resolved request.state.user)."""
+    """Self-service password change for any account that HAS a password: the bootstrap
+    `admin` / admin123 account, and any email account given one by the ADMIN_PASSWORD
+    seed, an APP_SECRET master reset, or a reset code. An account with no password
+    signs in by one-time code only and has nothing to change — it gets a 400 rather
+    than a way to set a first password here (that would turn this route into an
+    unauthenticated-password bootstrap for OTP-only users). Requires an authenticated
+    session (this route is NOT public — the auth_gateway already resolved
+    request.state.user)."""
     user = _current_user(request)
     if not user:
         raise HTTPException(401, "not authenticated")
-    if user.get("email") != "admin":
-        raise HTTPException(400, "password sign-in is only available for the local admin "
-                                 "account — email accounts sign in with a one-time code and "
-                                 "have no password to change")
-    full = store.get_user_by_email("admin") or user
+    full = store.get_user_by_email(user.get("email")) or user
     stored_hash = full.get("password_hash")
+    is_local_admin = full.get("email") == "admin"
+    if not stored_hash and not is_local_admin:
+        raise HTTPException(400, "this account has no password — it signs in with a "
+                                 "one-time code. Set ADMIN_PASSWORD in .env, or use a "
+                                 "password reset, to give it one.")
     current = body.current_password or ""
+    # Only the bootstrap admin may authenticate with the shipped default; every other
+    # account must present its real hash.
     current_ok = (auth.password_matches(stored_hash, current) if stored_hash
                   else current == DEFAULT_ADMIN_PASSWORD)
     if not current_ok:
@@ -275,7 +303,7 @@ def change_password(body: ChangePasswordIn, request: Request, response: Response
         raise HTTPException(400, "new password must be different from the current one")
 
     updated = store.set_user_password(full["id"], auth.hash_password(body.new_password))
-    _audit(request, "user.password_changed", target="admin", actor=user)
+    _audit(request, "user.password_changed", target=full.get("email", "admin"), actor=user)
     # set_user_password() bumps session_version, invalidating every session this
     # user holds — including the one making this request — so re-issue a fresh
     # cookie for THIS session immediately, or the caller would be logged out by

@@ -68,6 +68,86 @@ def _ensure_app_secret():
           "production.", flush=True)
 
 
+def _bootstrap_password_targets():
+    """The accounts the .env bootstrap password applies to.
+
+    Two rows, because there are two ways to name yourself at the sign-in form (it is
+    labelled "Username or email"):
+
+      1. the local `admin` account — the zero-config bootstrap identity;
+      2. the ADMIN_EMAIL admin — so the operator can sign in with the SAME
+         email + password pair they configured in .env, instead of having to reach
+         for /api/auth/reset-password-master to give that account a password.
+
+    The `admin` row is created here if missing (it is this function's own
+    bootstrap). The ADMIN_EMAIL row is only ever *seeded* — creating it belongs to
+    the ADMIN_EMAIL seed step above, which validates the address first, so a
+    malformed value never reaches this point as a user row.
+    """
+    targets = []
+    admin = store.get_user_by_email("admin")
+    if not admin:
+        admin = store.create_user("admin", "Admin", "admin")
+    targets.append(admin)
+
+    email = (ADMIN_EMAIL or "").strip().lower()
+    if email and email != "admin" and auth.is_valid_email(email):
+        row = store.get_user_by_email(email)
+        # Skip a row that IS the admin row (defensive: same id, different key).
+        if row and row["id"] != admin["id"]:
+            targets.append(row)
+    return targets
+
+
+def _seed_bootstrap_password():
+    """Apply the .env bootstrap password to the accounts it names.
+
+    The contract, as an operator reads it off .env:
+
+      * ADMIN_PASSWORD blank  → nothing is seeded, and DEFAULT_ADMIN_PASSWORD (see
+        core/config.py) stays the shipped `admin123`, so `admin` / admin123 signs in
+        with its forced change-on-first-login.
+      * ADMIN_PASSWORD set    → seeded onto the local `admin` row AND the ADMIN_EMAIL
+        row, so BOTH `admin` and that email sign in with it. DEFAULT_ADMIN_PASSWORD
+        becomes that value, so admin123 stops working.
+
+    Only ever fills an EMPTY password — a password changed in-app survives restarts.
+    RESET_ADMIN_PASSWORD / ADMIN_PASSWORD_FORCE are the deliberate override: they
+    overwrite an existing password, on every boot while the variable is set.
+    A value failing the policy is ignored with a warning rather than half-applied.
+    """
+    reset_env_pw = os.getenv("RESET_ADMIN_PASSWORD", "").strip() or os.getenv("ADMIN_PASSWORD_FORCE", "").strip()
+    if reset_env_pw:
+        errs = auth.password_policy_errors(reset_env_pw)
+        if errs:
+            print("[wardenIQ][WARNING] RESET_ADMIN_PASSWORD does not meet policy "
+                  f"({', '.join(errs)}); ignoring it.", flush=True)
+            return
+        for row in _bootstrap_password_targets():
+            store.set_user_password(row["id"], auth.hash_password(reset_env_pw))
+            print(f"[wardenIQ] Force-reset the password for {row['email']!r} from "
+                  "RESET_ADMIN_PASSWORD environment variable.", flush=True)
+        return
+
+    if not ADMIN_PASSWORD:
+        # Nothing configured: the shipped admin123 default stands (config.py resolves
+        # DEFAULT_ADMIN_PASSWORD to it) and no row is created or touched here.
+        return
+
+    errs = auth.password_policy_errors(ADMIN_PASSWORD)
+    if errs:
+        print("[wardenIQ][WARNING] ADMIN_PASSWORD does not meet the policy "
+              f"({', '.join(errs)}); ignoring it — the bootstrap admin keeps "
+              "the default until changed.", flush=True)
+        return
+
+    for row in _bootstrap_password_targets():
+        if not row.get("password_hash"):
+            store.set_user_password(row["id"], auth.hash_password(ADMIN_PASSWORD))
+            print(f"[wardenIQ] Seeded the password for {row['email']!r} from "
+                  "ADMIN_PASSWORD (the shipped default is disabled).", flush=True)
+
+
 def _check_app_secret():
     """Fail closed (or loudly warn) if APP_SECRET is weak.
 
@@ -206,38 +286,8 @@ def bootstrap():
                 store.create_user(ADMIN_EMAIL, ADMIN_EMAIL.split("@")[0], "admin")
     except Exception as e:  # noqa: BLE001
         BOOT["detail"] = f"admin seed: {e}"
-    # Seed the local `admin` account's password from ADMIN_PASSWORD (installer-chosen)
-    # so a provisioned deployment ships with NO well-known default. Only sets a
-    # password when the admin has none yet — it never clobbers one the operator has
-    # already changed in-app. A value that fails the policy is ignored with a warning
-    # (the account then keeps the admin123 default + its forced-change flow).
     try:
-        reset_env_pw = os.getenv("RESET_ADMIN_PASSWORD", "").strip() or os.getenv("ADMIN_PASSWORD_FORCE", "").strip()
-        if reset_env_pw:
-            errs = auth.password_policy_errors(reset_env_pw)
-            if errs:
-                print("[wardenIQ][WARNING] RESET_ADMIN_PASSWORD does not meet policy "
-                      f"({', '.join(errs)}); ignoring it.", flush=True)
-            else:
-                admin = store.get_user_by_email("admin")
-                if not admin:
-                    admin = store.create_user("admin", "Admin", "admin")
-                store.set_user_password(admin["id"], auth.hash_password(reset_env_pw))
-                print("[wardenIQ] Force-reset local admin password from RESET_ADMIN_PASSWORD environment variable.", flush=True)
-        elif ADMIN_PASSWORD:
-            errs = auth.password_policy_errors(ADMIN_PASSWORD)
-            if errs:
-                print("[wardenIQ][WARNING] ADMIN_PASSWORD does not meet the policy "
-                      f"({', '.join(errs)}); ignoring it — the bootstrap admin keeps "
-                      "the default until changed.", flush=True)
-            else:
-                admin = store.get_user_by_email("admin")
-                if not admin:
-                    admin = store.create_user("admin", "Admin", "admin")
-                if not admin.get("password_hash"):
-                    store.set_user_password(admin["id"], auth.hash_password(ADMIN_PASSWORD))
-                    print("[wardenIQ] Seeded the local admin password from ADMIN_PASSWORD "
-                          "(the shipped default is disabled).", flush=True)
+        _seed_bootstrap_password()
     except Exception as e:  # noqa: BLE001
         BOOT["detail"] = f"admin password seed: {e}"
     BOOT.update(stage="ready", ready=True, detail="")
