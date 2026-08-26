@@ -12,7 +12,7 @@ export default function FeatureCreatePanel() {
         <div className="feature-create-fields">
           <div>
             <label>Feature name</label>
-            <input id="f-name" placeholder="Checkout \u2014 Apply Promo Code" />
+            <input id="f-name" placeholder="e.g: Login" />
           </div>
           <div>
             <label>Ticket key (optional)</label>

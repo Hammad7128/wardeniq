@@ -285,94 +285,449 @@ nav button.active {
 .content {
   flex: 1;
   min-width: 0;
+  width: 100%;
+  container-type: inline-size;
+  container-name: warden-content;
 }
-header {
-  padding: 16px 26px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+
+/* =========================================================
+   APPLICATION HEADER — FINAL RESPONSIVE LAYOUT
+   - keeps service status truly centered
+   - keeps user controls pinned to the right
+   - stays on one row at normal laptop widths / 110% zoom
+   - moves to two rows only when the content area is genuinely narrow
+========================================================= */
+.content > header {
   position: sticky;
   top: 0;
-  z-index: 5;
-}
-header h1 {
-  font-size: 15px;
-  margin: 0;
-  font-weight: 600;
-}
-#status {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  /* z-index: 50; */
+
+  display: flex !important;
   align-items: center;
-  font-size: 12px;
+  justify-content: space-between;
+
+  width: 100%;
+  min-width: 0;
+  height: 74px;
+  min-height: 74px;
+  padding: 0 26px;
+
+  border-bottom: 1px solid var(--line);
+  background: #0c151f;
 }
-/* Service indicators grouped in one subtle pill cluster. */
+
+/* Left title / WORKSPACE block */
+.content > header > :first-child {
+  position: relative;
+  /* z-index: 2; */
+  flex: 0 0 auto;
+  min-width: 150px;
+}
+
+.content > header h1,
+.content > header #view-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+  white-space: nowrap;
+}
+
+/*
+ * The current Header.jsx keeps #status and .usermenu inside one right-side
+ * wrapper. Keep that wrapper intact. The previous display:contents rule was
+ * the reason separators and status controls dropped onto random grid rows.
+ */
+.content > header > div:has(> #status) {
+  position: static !important;
+  /* z-index: 2; */
+
+  display: flex !important;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+
+  margin-left: auto;
+}
+
+/* =========================================================
+   CENTER STATUS — TRUE HEADER CENTER
+========================================================= */
+#status {
+  position: absolute !important;
+  left: 50% !important;
+  top: 50% !important;
+  /* z-index: 1; */
+
+  display: flex !important;
+  min-width: max-content;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: nowrap !important;
+
+  font-size: 11.5px;
+  white-space: nowrap;
+
+  transform: translate(-50%, -50%) !important;
+  right: auto !important;
+  bottom: auto !important;
+}
+
 .status-group {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 3px 4px;
+  gap: 0;
+  flex: 0 0 auto;
+  min-width: max-content;
+
+  padding: 3px 5px;
+  border: 1px solid #263448;
+  border-radius: 999px;
+  background: rgba(17, 28, 40, 0.92);
+  white-space: nowrap;
 }
+
 .stat {
   display: inline-flex;
+  height: 27px;
   align-items: center;
-  color: var(--muted);
-  padding: 3px 9px;
-  border-radius: 16px;
+  flex: 0 0 auto;
+
+  padding: 0 10px;
+  border-radius: 999px;
+  color: #94a2b5;
+  font-size: 11.5px;
   line-height: 1;
   white-space: nowrap;
 }
+
 .status-group .stat + .stat {
-  border-left: 1px solid var(--line);
+  border-left: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 0;
 }
+
 .stat b {
   color: var(--text);
   font-weight: 600;
 }
-/* Metric chip (features · cases) stands apart from service dots. */
+
 .stat-metric {
   display: inline-flex;
+  height: 34px;
   align-items: center;
-  gap: 8px;
-  background: rgba(88, 166, 255, 0.08);
-  border: 1px solid rgba(88, 166, 255, 0.22);
-  border-radius: 20px;
-  padding: 4px 12px;
-  color: var(--muted);
+  gap: 9px;
+  flex: 0 0 auto;
+  min-width: max-content;
+
+  padding: 0 13px;
+  border: 1px solid rgba(88, 166, 255, 0.25);
+  border-radius: 999px;
+  background: rgba(39, 111, 188, 0.1);
+  color: #8e9bae;
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
 }
+
 .stat-metric b {
-  color: #cfe0f5;
-  font-weight: 700;
+  color: #d7e6f7;
+  font-weight: 650;
 }
+
 .stat-metric .sep {
   width: 1px;
-  height: 11px;
+  height: 12px;
+  flex: 0 0 auto;
   background: rgba(88, 166, 255, 0.28);
 }
+
 .dot {
   display: inline-block;
   width: 7px;
   height: 7px;
+  flex: 0 0 auto;
+  margin-right: 7px;
   border-radius: 50%;
-  margin-right: 6px;
   background: var(--muted);
-  flex-shrink: 0;
 }
+
 .dot.ok {
   background: var(--green);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.45);
 }
+
 .dot.bad {
   background: var(--red);
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.35);
 }
+
+/* =========================================================
+   RIGHT USER MENU
+========================================================= */
+.usermenu {
+  position: relative !important;
+  /* z-index: 2; */
+
+  display: flex !important;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+
+  white-space: nowrap;
+  transform: none !important;
+}
+
+.user-id {
+  min-width: 0;
+}
+
+.user-email,
+#user-email {
+  display: block;
+  max-width: 155px;
+  overflow: hidden;
+  color: #e7edf4;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rolebadge {
+  display: inline-flex;
+  min-height: 19px;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.rolebadge.admin {
+  color: #8fd0ff;
+  background: rgba(19, 112, 171, 0.22);
+}
+
+.rolebadge.editor {
+  color: #9bc7ff;
+  background: rgba(88, 166, 255, 0.15);
+}
+
+.rolebadge.viewer {
+  color: #abb7c5;
+  background: rgba(255, 255, 255, 0.065);
+}
+
+#change-pw-btn,
+.change-pw-btn {
+  display: inline-flex;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 0 0 auto;
+
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #8d9bad;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+#change-pw-btn:hover,
+.change-pw-btn:hover {
+  color: #e0e7ef;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+#logout-btn,
+.signout-btn {
+  display: inline-flex;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 0 0 auto;
+
+  padding: 0 14px;
+  border: 1px solid #2a394c;
+  border-radius: 8px;
+  background: transparent;
+  color: #d9e0e9;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+#logout-btn:hover,
+.signout-btn:hover {
+  color: #fff;
+  border-color: #43556d;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* =========================================================
+   110–125% ZOOM / NORMAL LAPTOP WIDTHS
+   Keep a SINGLE ROW. Compact gently instead of wrapping.
+========================================================= */
+@container warden-content (max-width: 1450px) {
+  .content > header {
+    padding: 0 20px;
+  }
+
+  #status {
+    gap: 6px;
+  }
+
+  .stat {
+    padding: 0 7px;
+    font-size: 10.75px;
+  }
+
+  .stat-metric {
+    padding: 0 10px;
+    font-size: 10.75px;
+  }
+
+  .usermenu {
+    gap: 7px;
+  }
+
+  .user-email,
+  #user-email {
+    max-width: 135px;
+  }
+
+  #change-pw-btn,
+  .change-pw-btn {
+    padding: 0 7px;
+    font-size: 11px;
+  }
+
+  #logout-btn,
+  .signout-btn {
+    padding: 0 11px;
+  }
+}
+
+/* =========================================================
+   TIGHT LAPTOP WIDTH
+   Preserve one row a little longer by reducing secondary text.
+========================================================= */
+@container warden-content (max-width: 1180px) {
+  .content > header {
+    padding: 0 16px;
+  }
+
+  .content > header > :first-child {
+    min-width: 125px;
+  }
+
+  .content > header h1,
+  .content > header #view-title {
+    font-size: 18px;
+  }
+
+  .user-email,
+  #user-email {
+    max-width: 110px;
+  }
+
+  #change-pw-btn,
+  .change-pw-btn {
+    width: 36px;
+    padding: 0;
+    overflow: hidden;
+    font-size: 0;
+    gap: 0;
+  }
+
+  #change-pw-btn svg,
+  .change-pw-btn svg {
+    width: 14px;
+    height: 14px;
+  }
+}
+
+/* =========================================================
+   GENUINELY NARROW CONTENT
+   Only here do we move status to a second row.
+========================================================= */
+@container warden-content (max-width: 1020px) {
+  .content > header {
+    height: auto;
+    min-height: 104px;
+    padding: 10px 16px;
+    align-items: flex-start;
+  }
+
+  .content > header > div:has(> #status) {
+    align-self: flex-start;
+  }
+
+  #status {
+    left: 16px !important;
+    right: 16px !important;
+    top: auto !important;
+    bottom: 10px !important;
+    width: auto;
+    min-width: 0;
+
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+
+    transform: none !important;
+  }
+
+  #status::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* =========================================================
+   MOBILE / TABLET
+========================================================= */
+@container warden-content (max-width: 760px) {
+  .content > header {
+    min-height: 116px;
+  }
+
+  .user-email,
+  #user-email {
+    max-width: 90px;
+  }
+
+  #change-pw-btn,
+  .change-pw-btn {
+    display: none !important;
+  }
+}
+
 main {
   padding: 26px 28px 32px;
   max-width: none;
@@ -620,16 +975,8 @@ main {
 .cfg-card-wide {
   grid-column: auto;
 }
-.cfg-field {
-  display: flex;
-  flex-direction: column;
-  margin-bottom: 14px;
-}
-.cfg-field label {
-  margin: 0 0 6px;
-  font-size: 12px;
-  color: var(--muted);
-}
+
+
 .fi {
   display: inline-flex;
   align-items: center;
@@ -672,7 +1019,7 @@ main {
   line-height: 1.55;
   letter-spacing: normal;
   text-transform: none;
-  z-index: 60;
+  /* z-index: 60; */
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   white-space: normal;
 }
@@ -684,7 +1031,7 @@ main {
   top: 135%;
   border: 5px solid transparent;
   border-bottom-color: #24344c;
-  z-index: 60;
+  /* z-index: 60; */
 }
 .cfg-field input,
 .cfg-field select {
@@ -910,3 +1257,37 @@ details.usage-collapse table {
   font-size: 12px;
   margin-bottom: 14px;
 }
+
+/* =========================================================
+   HEADER — STATUS / PROFILE SPACING FIX
+========================================================= */
+
+@container warden-content (min-width: 1301px) {
+
+  /* Give the right-side user area guaranteed space */
+  .content > header {
+    grid-template-columns:
+      minmax(170px, 1fr)
+      auto
+      minmax(430px, 1fr);
+
+    column-gap: 22px;
+  }
+
+  /* Slightly compact the feature/case pill */
+  .stat-metric {
+    padding-left: 11px !important;
+    padding-right: 11px !important;
+    gap: 7px !important;
+  }
+
+  /* Keep some clear distance before profile icon */
+  .usermenu {
+    padding-left: 10px;
+  }
+}
+
+
+
+
+
