@@ -64,7 +64,20 @@ class ProjectsMixin(_Base):
             p["gitlab_pat_set"] = bool(self.projects.find_one(
                 {"_id": ObjectId(pid)}, {"gitlab_pat_enc": 1}).get("gitlab_pat_enc"))
             p["repo_count"] = self.repos.count_documents({"project_id": pid})
-            p["feature_count"] = self.features.count_documents({"project_id": pid})
+            # Each version of a feature is stored as its OWN document in
+            # `features` (create_feature()/features.py), all sharing one
+            # `group_id` as the stable feature identity -- `_id` is per-version,
+            # not per-feature. A raw count_documents() over the collection was
+            # counting every version as if it were a distinct feature, so
+            # creating a new version of an existing feature inflated this
+            # number just like adding a brand-new one would. Dedup by group_id
+            # (falling back to the doc's own _id for pre-versioning features
+            # that predate group_id, exactly as list_features() already does)
+            # so this matches what the Features page actually lists.
+            group_ids = set()
+            for f in self.features.find({"project_id": pid}, {"group_id": 1}):
+                group_ids.add(f.get("group_id", str(f["_id"])))
+            p["feature_count"] = len(group_ids)
             out.append(p)
         return out
 
