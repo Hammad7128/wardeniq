@@ -108,6 +108,105 @@ class FeaturesMixin(_Base):
                             "score": round(row["score"], 4)})
         return out
 
+    def search_feature_chunks(self, query_embedding, feature_id, limit=8, category=None):
+        """Retrieve the most relevant chunks of ONE feature's own document(s) for a
+        query embedding -- the retrieval half of test-generation RAG (the write side
+        is add_feature_chunks()). Modeled directly on
+        store/code_coverage.py's search_code_chunks(): mongot $vectorSearch first
+        (fast, real similarity ranking), in-memory numpy cosine as a true fallback so
+        retrieval still works without a live search cluster (e.g. tests / dev / a
+        transient mongot outage).
+
+        `feature_id` is applied as a $vectorSearch pre-filter, not a post-hoc filter --
+        the fchunks index already declares `feature_id` as a filter field at
+        provisioning time (store/base.py's _ensure_vector(self.fchunks,
+        extra_filters=["project_id", "feature_id"])), so a chunk belonging to a
+        different feature can never enter the candidate pool, let alone the result.
+        The numpy fallback below applies the same feature_id scoping via its own
+        find() query, so cross-feature leakage is impossible on either path.
+
+        `category` is optional and purely for observability (e.g. "api"/"ui"/"e2e" from
+        testgen.service's category-specific generation retrieval) -- it is never used to
+        filter or score, only stamped onto the debug log line below so a log reader can
+        tell which of a run's several search_feature_chunks() calls this one was.
+        """
+        t0 = time.time()
+        try:
+            pool = max(int(limit) * 8, 40)
+            stage = {"index": VECTOR_INDEX, "path": "embedding",
+                     "queryVector": query_embedding, "numCandidates": pool, "limit": limit,
+                     "filter": {"feature_id": {"$eq": feature_id}}}
+            pipeline = [{"$vectorSearch": stage},
+                        {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+                        {"$limit": limit}]
+            out = [{"chunk_id": str(d.get("_id")), "chunk_index": d.get("chunk_index"),
+                    "source": d.get("source"), "text": d.get("text"),
+                    "score": round(float(d.get("score", 0)), 4)}
+                   for d in self.fchunks.aggregate(pipeline)]
+            if out:
+                self._log_feature_chunk_retrieval(feature_id, len(out), "atlas", time.time() - t0, category)
+                return out
+        except Exception:  # noqa: BLE001 -- no mongot / index -> numpy fallback below
+            pass
+        docs = list(self.fchunks.find(
+            {"feature_id": feature_id},
+            {"chunk_index": 1, "source": 1, "text": 1, "embedding": 1}))
+        if not docs:
+            self._log_feature_chunk_retrieval(feature_id, 0, "numpy", time.time() - t0, category)
+            return []
+        # Embedding-model-switch hardening: the store has no per-row model/dimension
+        # metadata (see the embedding-agnosticism investigation), so a query embedding
+        # from a different model/dimension than what's currently stored -- e.g. a
+        # partially-applied re-embed after a Settings model switch, or a race with a
+        # concurrent ingest -- is only detectable here, at compute time. Any of these
+        # ARE EXPECTED failure shapes on an unlucky day, not programmer errors, so they
+        # degrade this one retrieval to empty rather than raising out of
+        # search_feature_chunks() and crashing the whole test-generation pipeline (the
+        # $vectorSearch branch above already has this same "degrade, don't crash"
+        # posture for its own failures).
+        try:
+            import numpy as np
+            qv = np.asarray(query_embedding, dtype=float)
+            M = np.asarray([d["embedding"] for d in docs], dtype=float)
+            if qv.ndim != 1 or M.ndim != 2 or M.shape[1] != qv.shape[0]:
+                raise ValueError(
+                    f"embedding dimension mismatch: query has "
+                    f"{qv.shape[0] if qv.ndim == 1 else 'a ragged shape'}, stored chunks have "
+                    f"{M.shape[1] if M.ndim == 2 else 'a ragged shape'}"
+                )
+            qn = np.linalg.norm(qv) or 1.0
+            norms = np.linalg.norm(M, axis=1); norms[norms == 0] = 1.0
+            scores = (M @ qv) / (norms * qn)
+            order = np.argsort(-scores)[: int(limit)]
+            out = [{"chunk_id": str(docs[i]["_id"]), "chunk_index": docs[i].get("chunk_index"),
+                    "source": docs[i].get("source"), "text": docs[i].get("text"),
+                    "score": round(float(scores[i]), 4)} for i in order]
+        except Exception as exc:  # noqa: BLE001 -- dimension mismatch / malformed stored
+                                   # embedding / any other cosine-math failure -> degrade
+                                   # to empty, matching the atlas branch's posture above.
+            print(
+                f"[store][feature_chunks] numpy fallback failed for feature_id={feature_id}: "
+                f"{exc}",
+                flush=True,
+            )
+            self._log_feature_chunk_retrieval(feature_id, 0, "numpy_failed", time.time() - t0, category)
+            return []
+        self._log_feature_chunk_retrieval(feature_id, len(out), "numpy", time.time() - t0, category)
+        return out
+
+    @staticmethod
+    def _log_feature_chunk_retrieval(feature_id, count, source, duration_s, category=None):
+        """Store-layer half of retrieval observability: confirms which path
+        actually answered (atlas vs numpy fallback) and how long it took, without
+        the caller having to know that detail. Deliberately omits chunk text.
+        testgen.service adds the query-text/chunk-id/score-level log on top of this."""
+        cat = f"category={category} " if category else ""
+        print(
+            f"[store][feature_chunks] {cat}feature_id={feature_id} source={source} "
+            f"results={count} duration_ms={round(duration_s * 1000)}",
+            flush=True,
+        )
+
     def features_by_key(self, project_id, key):
         return [str(f["_id"]) for f in
                 self.features.find({"project_id": project_id, "key": key}, {"_id": 1})]
@@ -331,19 +430,14 @@ class FeaturesMixin(_Base):
             
         raw_text = feature.get("text") or ""
         raw_api_spec = feature.get("raw_api_spec") or ""
-        
-        # Load all chunks for this feature
-        fchunks = list(self.fchunks.find({"feature_id": feature_id}))
-        retrieved_chunks = [{"sourceType": c.get("source", "document"), "text": c.get("text", "")} for c in fchunks]
-        
+
         # Check if the configured LLM provider is local Ollama
         settings = self.get_settings()
         is_ollama = (settings.get("llm_provider", "ollama") == "ollama")
-        
+
         # Optimization: Apply dynamic limits on raw text slices to avoid CPU-Ollama context windows crashes/hangs
         prd_limit = 15000 if is_ollama else 80000
-        chunk_limit = 3 if is_ollama else 12
-        
+
         feature_name = feature.get("name") or "Unnamed Feature"
         prd_text = raw_text[:prd_limit]
         
@@ -401,9 +495,14 @@ class FeaturesMixin(_Base):
                 "featureName": feature.get("name"),
                 "featureId": feature_id
             },
-            "rag": {
-                "retrieved_chunks": retrieved_chunks[:chunk_limit]
-            },
+            # NOTE: previously this dict included a "rag" key built from ALL of this
+            # feature's chunks (unranked, capped at chunk_limit). Nothing ever read
+            # context["rag"] (confirmed via grep across prompt_builder.py/service.py),
+            # so it was deleted as dead code. Query-driven, category-specific retrieval
+            # now lives in generate_fresh_testcases_pipeline() via search_feature_chunks();
+            # the broad/unranked chunk corpus needed for grounding/extraction is still
+            # fetched separately there (store.fchunks.find({"feature_id": feature_id})),
+            # untouched by this change.
             "rawApiSpec": raw_api_spec
         }
 

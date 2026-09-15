@@ -192,6 +192,19 @@ def call_llm_json_with_repair(llm, system_prompt, user_prompt, max_tokens=4000,
     raise RuntimeError(f"LLM JSON generation failed after {attempts} attempts: {last_error}")
 
 
+# Trailing/wrapping punctuation a regex or LLM extraction can pick up around an
+# endpoint that was itself wrapped in markdown (inline code spans, emphasis, or a
+# quoted string) in the source PRD/HLD text -- e.g. a line like "`POST /auth/refresh`"
+# captures a stray trailing backtick into the endpoint string. Stripped at every site
+# an endpoint is captured or normalized so a markdown-wrapped and a clean extraction
+# of the SAME endpoint never look like two different endpoints.
+_ENDPOINT_JUNK_CHARS = ".)]>`*'\""
+
+
+def _clean_endpoint(endpoint: str) -> str:
+    return str(endpoint or "").strip().strip(_ENDPOINT_JUNK_CHARS)
+
+
 def _parse_raw_api_spec(raw_spec: str | None) -> list[dict]:
     found = {}
     for line in str(raw_spec or "").splitlines():
@@ -199,7 +212,7 @@ def _parse_raw_api_spec(raw_spec: str | None) -> list[dict]:
         if not match:
             continue
         method = match.group(1).upper()
-        endpoint = match.group(2).rstrip(".)]>")
+        endpoint = _clean_endpoint(match.group(2))
         key = f"{method}:{normalize_endpoint(endpoint)}"
         found[key] = {
             "method": method,
@@ -220,7 +233,7 @@ def _merge_api_candidates(*groups) -> list[dict]:
         if not isinstance(item, dict):
             continue
         method = str(item.get("method") or "").upper()
-        endpoint = str(item.get("endpoint") or item.get("path") or "").strip()
+        endpoint = _clean_endpoint(item.get("endpoint") or item.get("path") or "")
         if method not in API_METHODS or not endpoint.startswith("/"):
             continue
         normalized = {**item, "method": method, "endpoint": endpoint}
@@ -255,6 +268,198 @@ def _evidence_corpus(context: dict, rag_context: dict) -> str:
         json.dumps(value) if isinstance(value, (dict, list)) else str(value)
         for value in parts if value
     )
+
+
+# --- Category-specific generation retrieval -----------------------------------------
+# Query-driven RAG for test-case GENERATION (as opposed to extraction/grounding, which
+# keep using the broad `rag_context` above via _evidence_corpus() -- see the call sites
+# in generate_fresh_testcases_pipeline() for the extraction-vs-generation rationale).
+#
+# Generation needs PRECISION: a small, ranked, category-scoped slice of this feature's
+# own chunks, retrieved by an actual semantic query built from what Pass 0/1/2 already
+# extracted (no extra LLM call). Extraction and post-generation grounding need RECALL:
+# the full, unranked chunk corpus, so a real signal in the document isn't discarded just
+# because it didn't match this run's particular query text. Both concepts are backed by
+# the SAME store.fchunks collection -- only how much of it, and in what order, is used.
+#
+# K defaults are simple and static for now (per user instruction: no dynamic K selection
+# yet, tune after evaluation) but Ollama-aware, mirroring the existing num_ctx=8192
+# cap on call_llm_json_with_repair(): a CPU-bound local model gets fewer, tighter chunks
+# so the category evidence block doesn't crowd out the rest of the prompt.
+RAG_TOP_K_DEFAULTS = {"api": 8, "ui": 8, "e2e": 6, "business": 6}
+RAG_TOP_K_OLLAMA_DEFAULTS = {"api": 4, "ui": 4, "e2e": 4, "business": 4}
+
+
+def _category_top_k(category: str, is_ollama: bool) -> int:
+    table = RAG_TOP_K_OLLAMA_DEFAULTS if is_ollama else RAG_TOP_K_DEFAULTS
+    return table.get(category, 8)
+
+
+# Below this many discovered endpoints, an API-category query built from just
+# "METHOD /path" strings is too narrow to differentiate from the E2E/business
+# queries -- live-evaluation finding (Authentication feature, 1 discovered endpoint):
+# the API-category retrieval converged on the SAME top chunks as the E2E category,
+# because the query itself carried almost no distinguishing signal. See
+# _api_adjacent_requirement_lines() below for the deterministic broadening.
+API_QUERY_BROADEN_BELOW_ENDPOINTS = 2
+
+# Vocabulary used to pick out the subset of already-extracted business requirement
+# lines that read as API/state-mutation relevant (CRUD verbs, request/response/
+# field/status-code language) -- deliberately narrower than the full description
+# text _build_e2e_retrieval_query()/_build_business_retrieval_query() use, so
+# broadening the API query doesn't just turn it into a copy of those.
+_API_ADJACENT_KEYWORDS = (
+    "endpoint", "api", "request", "response", "payload", "status code", "http",
+    "create", "update", "delete", "fetch", "retrieve", "field", "parameter",
+    "validate", "validation", "token", "header", "query param", "body",
+)
+
+
+def _api_adjacent_requirement_lines(business_context: dict | None) -> list[str]:
+    """Deterministic filter over businessContext requirement lines (same source
+    data _build_e2e_retrieval_query()/_build_business_retrieval_query() read --
+    no new extraction, no new LLM call) for the subset that reads as API/
+    state-mutation relevant. Used only to broaden the API-category query when Pass
+    0/2 discovered too few explicit endpoints to build a differentiated query from
+    endpoint strings alone."""
+    ctx = business_context or {}
+    requirements = _as_list(ctx.get("requirements"))
+    prd = ctx.get("prd")
+    if not requirements and isinstance(prd, dict):
+        requirements = _as_list(prd.get("requirements"))
+    lines = []
+    for item in requirements:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(keyword in lowered for keyword in _API_ADJACENT_KEYWORDS):
+            lines.append(text)
+    return lines
+
+
+def _build_api_retrieval_query(
+    entities: list, api_surface: list, business_context: dict | None = None
+) -> str:
+    """Deterministic API-category retrieval query text: every known endpoint's
+    "METHOD /path", followed by grounded entity names, in extraction order. Built
+    entirely from Pass 1 (grounded_entities) and Pass 2 (api_surface) output that the
+    pipeline has already computed by the time this is called -- no new LLM call.
+
+    When Pass 0/2 discovered fewer than API_QUERY_BROADEN_BELOW_ENDPOINTS endpoints,
+    the query above is broadened with the API-adjacent subset of businessContext's
+    requirement lines (see _api_adjacent_requirement_lines()) -- still fully
+    deterministic, still no new LLM call, and still a smaller/differently-shaped
+    slice of the same requirement text than the E2E/business queries use, so this
+    doesn't just make the API query converge with them instead."""
+    parts = []
+    endpoint_count = 0
+    for api in _as_list(api_surface):
+        if not isinstance(api, dict):
+            continue
+        endpoint = str(api.get("endpoint") or api.get("path") or "").strip()
+        if not endpoint:
+            continue
+        method = str(api.get("method") or "").upper().strip()
+        parts.append(f"{method} {endpoint}".strip())
+        endpoint_count += 1
+    for entity in _as_list(entities):
+        if not isinstance(entity, dict):
+            continue
+        name = str(entity.get("entity") or entity.get("name") or "").strip()
+        if name:
+            parts.append(name)
+    if endpoint_count < API_QUERY_BROADEN_BELOW_ENDPOINTS:
+        parts.extend(_api_adjacent_requirement_lines(business_context))
+    return " ".join(parts).strip()
+
+
+def _build_ui_retrieval_query(ui_components: list, feature_name: str) -> str:
+    """Deterministic UI-category retrieval query text: the feature name plus every
+    known UI element/screen label, in extraction order. Built from Pass 1's
+    ui_components (LLM-grounded or the _derive_ui_components() fallback), both of
+    which use the same "element"/"screen" shape -- no new LLM call."""
+    parts = [str(feature_name or "").strip()]
+    for component in _as_list(ui_components):
+        if not isinstance(component, dict):
+            continue
+        screen = str(component.get("screen") or "").strip()
+        element = str(component.get("element") or component.get("label") or component.get("name") or "").strip()
+        if screen:
+            parts.append(screen)
+        if element:
+            parts.append(element)
+    return " ".join(p for p in parts if p).strip()
+
+
+def _build_e2e_retrieval_query(business_context: dict, feature_name: str, feature_description: str) -> str:
+    """Deterministic E2E/business-category retrieval query text: the feature name and
+    description plus the business rule requirement lines already extracted into
+    businessContext (build_unified_context() -> extract_business_context()). Built
+    from data the pipeline already has -- no new LLM call."""
+    parts = [str(feature_name or "").strip(), str(feature_description or "").strip()]
+    requirements = []
+    if isinstance(business_context, dict):
+        prd_block = business_context.get("prd")
+        if isinstance(prd_block, dict):
+            requirements = _as_list(prd_block.get("requirements"))
+        if not requirements:
+            requirements = _as_list(business_context.get("requirements"))
+    for requirement in requirements[:25]:
+        text = str(requirement or "").strip()
+        if text:
+            parts.append(text)
+    return " ".join(p for p in parts if p).strip()
+
+
+def _build_business_retrieval_query(business_context: dict, feature_name: str, feature_description: str) -> str:
+    """Deterministic business-category retrieval query text: feature name/description
+    plus every already-extracted business-rule signal -- requirement lines, acceptance
+    criteria, and user stories (all produced by extract_business_context() in
+    store/features.py, part of build_unified_context()) -- in extraction order. Built
+    from data the pipeline already has -- no new LLM call.
+
+    Deliberately distinct from _build_e2e_retrieval_query(): that one stays close to
+    plain requirement lines for user-journey framing, while this one also pulls
+    acceptance-criteria and user-story lines, which are the stronger signal for
+    "what business rule does this test enforce" -- the question business_tests answers.
+    Handles both businessContext shapes seen in this codebase: the flat dict
+    extract_business_context() actually returns (requirements/acceptanceCriteria/
+    userStories at the top level) and a {"prd": {...}} nested variant some call sites
+    (and the FakeStore test fixture) use -- same dual-shape handling as
+    _build_e2e_retrieval_query() above.
+    """
+    parts = [str(feature_name or "").strip(), str(feature_description or "").strip()]
+    requirements, acceptance_criteria, user_stories = [], [], []
+    if isinstance(business_context, dict):
+        prd_block = business_context.get("prd")
+        source = prd_block if isinstance(prd_block, dict) else business_context
+        requirements = _as_list(source.get("requirements"))
+        acceptance_criteria = _as_list(source.get("acceptanceCriteria"))
+        user_stories = _as_list(source.get("userStories"))
+    for value in (*requirements[:15], *acceptance_criteria[:10], *user_stories[:10]):
+        text = str(value or "").strip()
+        if text:
+            parts.append(text)
+    return " ".join(p for p in parts if p).strip()
+
+
+def _to_rag_context(summary: str, chunks: list) -> dict:
+    """Adapt search_feature_chunks()'s [{chunk_id, chunk_index, source, text, score}]
+    result rows into the {"summary", "retrieved_chunks":[{"sourceType","score","text"}]}
+    shape build_rag_evidence_block() (and the broad `rag_context` above) already expect,
+    so category contexts are drop-in compatible with the existing prompt-builder code."""
+    return {
+        "summary": summary,
+        "retrieved_chunks": [
+            {
+                "sourceType": item.get("source") or "document",
+                "score": item.get("score", 0.0),
+                "text": item.get("text", ""),
+            }
+            for item in _as_list(chunks)
+        ],
+    }
 
 
 def _priority(value) -> str:
@@ -341,6 +546,262 @@ def _filter_ui_tests(cases: list, corpus: str, ui_components: list[dict]) -> lis
         if field in corpus or any(field in value or value in field for value in allowed):
             out.append(case)
     return out
+
+
+# --- Category-agnostic content-level grounding guard --------------------------------
+# _filter_api_tests()/_filter_ui_tests() above only check a case's SUBJECT is real (a
+# real endpoint, a real field name) -- neither says anything about the case's CONTENT.
+# A case can reference a genuinely real endpoint or field and still assert a specific
+# numeric requirement (a length limit, a digit count, a timeout, a retry count, a
+# percentage...) that nothing in the evidence actually states. This guard catches that
+# narrower, content-level failure mode, applied uniformly across all five generated
+# suites (api_tests/ui_validations/e2e_tests/edge_cases/business_tests) on any
+# feature -- no category- or domain-specific keywords, no new LLM call, and no change
+# to retrieval or embeddings (pure text comparison against the same broad `corpus`
+# _evidence_corpus() already builds for entities/API grounding), so it works
+# identically under any embedding provider/model configured through Settings.
+#
+# Design: only sentences that already read as an asserted RULE (the same
+# REQUIREMENT_MARKERS vocabulary _requirement_gaps() uses to find requirement-shaped
+# PRD lines, applied here to generated case text instead) AND that state a specific
+# number are checked. A case describing a general, unnumbered scenario ("ensure a
+# delivery address is provided") is a reasonable derived scenario and is left
+# untouched -- only a specific, checkable numeric claim ("must not exceed 20 percent")
+# is held to evidence. A number is considered supported when that same number occurs
+# in the corpus with a matching qualifier word (its stem) among the few TOKENS
+# immediately surrounding it -- not a bare digit, and not a raw character window
+# (which can accidentally reach into an unrelated word earlier in the same sentence).
+# Tokenizing on letters/digits (hyphens and other punctuation are not token
+# characters) means real PRD prose that hyphenates or reorders a number and its unit
+# ("10-minute window", "401-equivalent error") still matches -- "10-minute" tokenizes
+# to adjacent tokens "10", "minute" -- while an unrelated fact that happens to share
+# the same digit elsewhere in the document (a 15-MINUTE token lifetime "supporting"
+# an invented 15-CHARACTER field limit, or an unrelated noun a few words earlier in
+# the same sentence as an unrelated number) is correctly rejected.
+_NUMBER_TOKEN = re.compile(r"\d+(?:\.\d+)?")
+_WORD_TOKEN = re.compile(r"[a-zA-Z]+")
+_WORD_OR_NUMBER_TOKEN = re.compile(r"[a-zA-Z]+|\d+(?:\.\d+)?")
+_CLAIM_TOKEN_WINDOW = 2
+
+
+def _stem(word: str) -> str:
+    word = word.lower()
+    return word[:-1] if word.endswith("s") and len(word) > 3 else word
+
+
+def _next_qualifier_word(text: str, end: int) -> str | None:
+    match = _WORD_TOKEN.search(text, end)
+    if match and match.start() - end <= 3:
+        return match.group(0)
+    return None
+
+
+def _corpus_number_tokens(corpus: str) -> list[str]:
+    return _WORD_OR_NUMBER_TOKEN.findall(corpus)
+
+
+def _number_claim_supported(number: str, qualifier: str, corpus_tokens: list[str]) -> bool:
+    qualifier_stem = _stem(qualifier)
+    for idx, token in enumerate(corpus_tokens):
+        if token != number:
+            continue
+        neighbors = (
+            corpus_tokens[max(0, idx - _CLAIM_TOKEN_WINDOW): idx]
+            + corpus_tokens[idx + 1: idx + 1 + _CLAIM_TOKEN_WINDOW]
+        )
+        if any(_stem(word) == qualifier_stem for word in neighbors if word.isalpha()):
+            return True
+    return False
+
+
+def _case_claim_segments(case: dict) -> list[str]:
+    """The parts of a case that ASSERT something about the system, kept separate.
+
+    Two distinctions matter here, and collapsing the case into one blob got both wrong:
+
+    1. A step's ACTION is an input the tester supplies, not a claim about the product.
+       Probing a documented boundary reads "Enter 241 characters" against a grounded
+       240-character limit, and treating that 241 as an asserted requirement drops a
+       perfectly well-grounded negative test. Actions are therefore not evaluated;
+       titles, intents, descriptions and step EXPECTATIONS -- where a fabricated limit
+       actually gets asserted -- are.
+    2. Segments are judged independently. Joined into one string they became a single
+       marker-matching "sentence" (generated case text rarely ends in a period), so a
+       "rejected" in one step licensed judging every number in the title, and vice
+       versa."""
+    segments = [
+        str(case.get("title") or ""),
+        str(case.get("intent") or ""),
+        str(case.get("description") or ""),
+    ]
+    segments.extend(step["expected"] for step in _normal_steps(case))
+    return [segment for segment in segments if segment.strip()]
+
+
+def _unsupported_numeric_claims(case: dict, corpus) -> list[str]:
+    """Return the specific number+qualifier claims this case states as a
+    requirement (matched via REQUIREMENT_MARKERS) that the evidence corpus does not
+    back. `corpus` may be a raw evidence-corpus string (matching
+    _grounded_item_supported()'s convention -- tokenized internally, lowercased if
+    not already) or a pre-tokenized/lowercased token list (see
+    _corpus_number_tokens()), for callers that already tokenized once for a whole
+    batch of cases."""
+    corpus_tokens = corpus if isinstance(corpus, list) else _corpus_number_tokens(str(corpus or "").lower())
+    unsupported = []
+    for segment in _case_claim_segments(case):
+        for sentence in re.split(r"[\n\r]+|(?<=[.!?])\s+", segment):
+            clean = sentence.strip()
+            if not clean or not REQUIREMENT_MARKERS.search(clean):
+                continue
+            lowered = clean.lower()
+            for match in _NUMBER_TOKEN.finditer(lowered):
+                qualifier = _next_qualifier_word(lowered, match.end())
+                if not qualifier:
+                    continue
+                if not _number_claim_supported(match.group(0), qualifier, corpus_tokens):
+                    unsupported.append(f"{match.group(0)} {qualifier}")
+    return unsupported
+
+
+def _filter_ungrounded_claims(cases: list[dict], corpus: str) -> list[dict]:
+    """Drop any generated case -- from any of the five suites -- that states a
+    specific numeric requirement whose value isn't backed anywhere in the evidence
+    corpus. Cases with no such claim, including well-grounded cases and reasonable
+    unnumbered derived scenarios, pass through unchanged. This is the single point
+    where every suite is held to the same content-level grounding standard,
+    regardless of category or feature."""
+    corpus_tokens = _corpus_number_tokens(str(corpus or "").lower())
+    return [
+        case for case in cases
+        if isinstance(case, dict) and not _unsupported_numeric_claims(case, corpus_tokens)
+    ]
+
+
+# --- Category evidence sufficiency (deterministic, pre-generation) -------------------
+# The grounding filters above are all POST-generation: they drop what the model already
+# invented. That is the right shape for "this case's content isn't backed", but it is
+# the wrong shape for the more basic failure the live Authentication validation exposed:
+# a category with NO subject evidence at all still had its generation worker invoked,
+# and a model asked to "generate UI validations" with nothing to ground against will
+# produce plausible, standard-looking, entirely invented ones (a phone-length limit, an
+# OTP digit count, a submit-button rule) rather than nothing. Filtering afterwards can
+# only catch the subset of those inventions that is mechanically checkable.
+#
+# So the pipeline also needs a deterministic answer to "does this category have any
+# evidence to generate FROM at all", computed BEFORE the call, from extraction output
+# the pipeline already has (no new LLM call, no new retrieval, no embedding involved --
+# therefore identical under every embedding provider/model configured through Settings).
+# Where a category owns a standalone generation call, an insufficient verdict skips that
+# call outright: nothing is invented, and an unnecessary LLM call is saved. Where a
+# category shares a call with others (edge_cases/business_tests ride the E2E call), the
+# verdict is reported rather than acted on destructively, because skipping would take
+# the sibling categories down with it.
+#
+# Deliberately keyed on the COUNT of already-extracted, already-grounded subjects --
+# never on keywords, category names, or feature-specific vocabulary -- so it behaves
+# the same for Authentication, Ride Booking, Payments, or anything else:
+#   api      -- grounded endpoints discovered by Pass 0/1/2 (api_surface)
+#   ui       -- UI elements that survived Pass 1 grounding or _derive_ui_components(),
+#               else any UI signal at all in the evidence corpus (see below)
+#   e2e      -- the feature's own description/requirement lines (a feature always has a
+#               description, so E2E journeys always have something to derive from)
+#   edge     -- API/state-mutation evidence, matching what the edge block is actually
+#               fed (api_rag_context) in the shared E2E call
+#   business -- extracted business narrative: requirements, acceptance criteria, stories
+
+
+# The domain-independent vocabulary for "these documents describe a user interface at
+# all". This is the SAME control-noun set _derive_ui_components() already mines for
+# below, plus the three container words a UI is described in; it names UI machinery, not
+# any product's subject matter, so it carries no feature-specific assumption (there is
+# nothing here about phone numbers, codes, or what a button should do -- only that a
+# document mentioning a button is a document with a UI in it). It answers a strictly
+# narrower question than _derive_ui_components(), which additionally has to produce a
+# usable component LABEL and so discards perfectly good UI evidence whose surrounding
+# phrasing doesn't yield one -- fine when building component records, wrong when the
+# question is merely "is there any UI evidence here".
+#
+# The failure modes are asymmetric on purpose: a false positive costs only the behavior
+# the pipeline already had (the UI worker runs, and the existing subject/content filters
+# handle the output), while a false negative would skip a UI suite the feature deserved.
+# So this errs permissive.
+_UI_EVIDENCE_SIGNAL = re.compile(
+    r"\b(input|field|picker|selector|dropdown|toggle|checkbox|screen|form|button)s?\b",
+    re.IGNORECASE,
+)
+
+
+def _has_ui_evidence_signal(text: str) -> bool:
+    return bool(_UI_EVIDENCE_SIGNAL.search(str(text or "")))
+
+
+def _business_narrative_lines(business_context: dict | None) -> list[str]:
+    """Every already-extracted business-rule line, from both businessContext shapes this
+    codebase uses (flat, as extract_business_context() returns, and the {"prd": {...}}
+    nested variant) -- the same sources _build_business_retrieval_query() reads, so the
+    sufficiency verdict and the business retrieval query agree on what "business
+    evidence" means."""
+    ctx = business_context if isinstance(business_context, dict) else {}
+    prd_block = ctx.get("prd")
+    source = prd_block if isinstance(prd_block, dict) else ctx
+    lines = []
+    for key in ("requirements", "acceptanceCriteria", "userStories"):
+        for value in _as_list(source.get(key)):
+            text = str(value or "").strip()
+            if text:
+                lines.append(text)
+    if source is not ctx:
+        for value in _as_list(ctx.get("requirements")):
+            text = str(value or "").strip()
+            if text:
+                lines.append(text)
+    return lines
+
+
+def _category_evidence_sufficiency(
+    api_surface: list, ui_components: list, business_context: dict | None,
+    feature_description: str = "", evidence_text: str = "",
+) -> dict:
+    """Per-category "is there anything to generate from" verdict. See the block comment
+    above -- deterministic, embedding-independent, feature-agnostic.
+
+    The UI verdict deliberately looks WIDER than `ui_components`: that list is built from
+    Pass 1's extraction plus a _derive_ui_components() pass over the feature's own `text`
+    field, which is only one of the documents that can back a feature. A PRD that carries
+    the UI description in a second, separately-ingested document would leave
+    ui_components empty while the evidence corpus plainly contains UI material. So the
+    verdict falls back to _has_ui_evidence_signal() over the whole evidence corpus (the
+    identical text _evidence_corpus() already assembles for grounding -- no new
+    retrieval, no embedding, no LLM call). ui_components itself is NOT widened by
+    this: the retrieval query and _filter_ui_tests()'s allow-list keep using exactly the
+    components they used before, so nothing downstream loosens. The verdict is only ever
+    more permissive than a bare `bool(ui_components)`, which means it can never newly
+    suppress a UI suite that would have been generated before -- it only says "no UI
+    evidence" when there is no UI signal anywhere in the feature's evidence at all."""
+    narrative = _business_narrative_lines(business_context)
+    has_ui_evidence = (
+        bool(_as_list(ui_components)) or _has_ui_evidence_signal(evidence_text)
+    )
+    return {
+        "api": bool(_as_list(api_surface)),
+        "ui": has_ui_evidence,
+        "e2e": bool(str(feature_description or "").strip() or narrative),
+        "edge": bool(_as_list(api_surface)),
+        "business": bool(narrative),
+    }
+
+
+def _insufficient_evidence_warning(category: str) -> str:
+    """User-facing explanation attached to the job result when a category had no
+    evidence. The requirement is that the pipeline either generates only what the
+    evidence supports OR says the evidence was insufficient -- this is that second
+    branch, made visible on the job instead of silently returning an empty suite (which
+    is indistinguishable from "the model produced nothing")."""
+    return (
+        f"{category}: no supporting evidence was found in this feature's documents, so "
+        f"no {category} tests were generated from invented details. Add source material "
+        f"covering this area to get {category} coverage."
+    )
 
 
 def _derive_ui_components(raw_text: str, limit: int = 40) -> list[dict]:
@@ -579,6 +1040,74 @@ def _project_existing_tests(store, project_id) -> list[dict]:
     return out
 
 
+# --- Fusion payload size safety -------------------------------------------------------
+# build_fusion_pass_prompt() serializes _project_existing_tests()'s output (up to 200
+# project-wide cases, each up to 8 steps) directly into the Fusion prompt. Case count is
+# not a safe proxy for prompt size: step count and step-text length vary per case, so a
+# fixed COUNT cap (prompt_builder's existing `[:100]` slice) can still pass through a
+# payload large enough to blow a real model's context window -- exactly what happened
+# live (173 project cases produced a 232,629-token prompt against a 128K-token model).
+#
+# The fix bounds by actual SERIALIZED SIZE, not count, and it is deliberately not sized
+# to any one model: this codebase has no per-provider context-window registry to consult
+# (Settings lets the user pick Nomic/OpenAI/Voyage/Bedrock/Gemini for EMBEDDINGS, and
+# num_ctx below is Ollama-only -- cloud generation providers receive the full prompt
+# text and are bounded only by their own real limit, which this process cannot see). A
+# fixed conservative character budget therefore has to be safe under the smallest
+# context window in realistic use while leaving the rest of the Fusion prompt (PRD text,
+# siblings, graph context, previous-version tests, system/output-schema overhead, and
+# room for the response) comfortable headroom under even a small hosted model's limit.
+#
+# No new LLM call: the same project_tests list _project_existing_tests() already fetched
+# is reused; when it already fits, nothing is trimmed or reordered, so small/typical
+# projects see byte-identical Fusion behavior to before this change.
+_FUSION_EXISTING_TESTS_CHAR_BUDGET = 40_000  # ~10K tokens at a conservative 4 chars/token
+
+
+def _case_relevance_score(case: dict, query_tokens: set) -> int:
+    """Cheap, deterministic overlap between a candidate case's own title and the
+    current feature's text -- no LLM call, no embedding, just the same token-overlap
+    technique _requirement_gaps() already uses elsewhere in this file. Good enough to
+    prefer cases that are actually about the current feature's subject matter over
+    unrelated project noise when not everything fits."""
+    if not query_tokens:
+        return 0
+    tokens = set(re.findall(r"[a-z0-9]{3,}", str(case.get("title") or "").lower()))
+    return len(tokens & query_tokens)
+
+
+def _bound_project_tests_for_fusion(
+    project_tests: list[dict], feature_text: str,
+    budget_chars: int = _FUSION_EXISTING_TESTS_CHAR_BUDGET,
+) -> tuple[list[dict], int]:
+    """Trim project_tests to fit budget_chars of serialized JSON, keeping the
+    most-relevant-to-this-feature cases when not everything fits, and keeping
+    project_tests completely UNCHANGED (same list, same order) when it already fits --
+    so a typical/small project's Fusion prompt is byte-identical to before this change.
+    Returns (bounded_list, dropped_count)."""
+    if not project_tests:
+        return project_tests, 0
+    if len(json.dumps(project_tests, indent=2)) <= budget_chars:
+        return project_tests, 0
+
+    query_tokens = set(re.findall(r"[a-z0-9]{3,}", str(feature_text or "").lower()))
+    ranked = sorted(
+        enumerate(project_tests),
+        key=lambda pair: (-_case_relevance_score(pair[1], query_tokens), pair[0]),
+    )
+    kept_ids = set()
+    running = 2  # "[]"
+    for index, case in ranked:
+        size = len(json.dumps(case, indent=2)) + 2  # ",\n" separator, approximated
+        if running + size > budget_chars:
+            continue  # a smaller, lower-ranked case later may still fit
+        kept_ids.add(index)
+        running += size
+
+    bounded = [case for index, case in enumerate(project_tests) if index in kept_ids]
+    return bounded, len(project_tests) - len(bounded)
+
+
 def _semantic_reuse_compatible(candidate: dict, case: dict, test_type: str) -> bool:
     if str(candidate.get("type") or "") != test_type:
         return False
@@ -759,7 +1288,11 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
     grounded = call_llm_json_with_repair(
         llm, SYSTEM, build_grounded_extraction_prompt(context, rag_context), max_tokens=4000
     )
-    corpus = _evidence_corpus(context, rag_context).lower()
+    # Original-case evidence is kept alongside the lowercased grounding corpus: the
+    # category evidence verdict below runs a case-sensitive derivation over it, while
+    # every grounding comparison keeps using the lowercased form exactly as before.
+    evidence_text = _evidence_corpus(context, rag_context)
+    corpus = evidence_text.lower()
     entities = [
         item for item in filter_hallucinated_entities(
             _as_list(grounded.get("grounded_entities")), corpus
@@ -773,6 +1306,7 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
     ui_components = [
         value for value in _as_list(grounded.get("ui_components"))
         if isinstance(value, dict) and not is_few_shot_leak(value, corpus)
+        and _grounded_item_supported(value, corpus)
     ]
     if not ui_components:
         ui_components = _derive_ui_components(raw_text)
@@ -800,11 +1334,126 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
         24,
     )
 
+    # Per-category evidence verdict (see _category_evidence_sufficiency' block comment):
+    # computed once, from what Pass 0/1/2 already extracted, and consulted below wherever
+    # a category owns a generation call it should not make with nothing to ground against.
+    evidence_sufficient = _category_evidence_sufficiency(
+        api_surface, ui_components, context.get("businessContext"),
+        context.get("featureDescription"), evidence_text,
+    )
+    insufficient = [name for name, ok in evidence_sufficient.items() if not ok]
+    if insufficient:
+        log_progress(
+            update_job_fn,
+            "Evidence check: insufficient source evidence for "
+            f"{', '.join(sorted(insufficient))} -- these categories will not be "
+            "generated from invented details",
+            26,
+        )
+
+    # --- Category-specific generation retrieval (query-driven RAG) -------------------
+    # Runs exactly once per category, using information Pass 0/1/2 already extracted
+    # above (entities, api_surface, ui_components, businessContext) -- no extra LLM call
+    # to synthesize a retrieval query. Every worker within a category (e.g. every API
+    # chunk's happy/negative/chaos worker) reuses this SAME result rather than each
+    # retrieving on its own. This is deliberately separate from the broad `rag_context`
+    # built above: that one keeps feeding Pass 0/1 and _evidence_corpus()/grounding
+    # unchanged (recall), while api_rag_context/ui_rag_context/e2e_rag_context below feed
+    # only the generation workers (precision). See the module-level comment above
+    # RAG_TOP_K_DEFAULTS for the full rationale.
+    settings = store.get_settings() if hasattr(store, "get_settings") else {}
+    is_ollama = ((settings or {}).get("llm_provider", "ollama") == "ollama")
+
+    def _retrieve_category_context(category: str, query_text: str) -> dict:
+        top_k = _category_top_k(category, is_ollama)
+        query_text = (query_text or "").strip()
+        if not query_text:
+            print(
+                f"[TestGen][rag] category={category} feature_id={feature_id} "
+                f"k={top_k} query_chars=0 results=0 note=empty_query_no_retrieval",
+                flush=True,
+            )
+            return _to_rag_context(rag_context.get("summary", ""), [])
+        # Retrieval degrades, it never crashes generation. Store.search_feature_chunks()
+        # already has this posture internally for its own two paths (a mongot outage
+        # falls through to numpy cosine; an embedding-DIMENSION mismatch between the
+        # query vector and the stored chunk vectors -- the realistic shape of a
+        # partially-applied embedding-model switch through Settings -- degrades that one
+        # retrieval to empty). The embed() call itself sat OUTSIDE that protection: a
+        # provider timeout, an auth failure, or a model swapped mid-run raised straight
+        # out of the pipeline and killed the whole job, including the four categories
+        # that had nothing wrong with them. Both halves are now inside the same guard,
+        # so a category that cannot retrieve falls back to an empty evidence block --
+        # which the grounding filters then treat as "no evidence", the correct and safe
+        # reading -- instead of taking the run down.
+        try:
+            query_embedding = embedder.embed(query_text, task="query")
+            chunks = store.search_feature_chunks(
+                query_embedding, feature_id, limit=top_k, category=category
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[TestGen][rag] category={category} feature_id={feature_id} k={top_k} "
+                f"query_chars={len(query_text)} results=0 "
+                f"note=retrieval_failed_degraded_to_empty error={exc}",
+                flush=True,
+            )
+            return _to_rag_context(rag_context.get("summary", ""), [])
+        print(
+            f"[TestGen][rag] category={category} feature_id={feature_id} k={top_k} "
+            f"query_chars={len(query_text)} results={len(chunks)} "
+            f"chunk_ids={[c.get('chunk_id') for c in chunks]} "
+            f"chunk_indexes={[c.get('chunk_index') for c in chunks]} "
+            f"scores={[c.get('score') for c in chunks]}",
+            flush=True,
+        )
+        return _to_rag_context(rag_context.get("summary", ""), chunks)
+
+    api_query_text = _build_api_retrieval_query(entities, api_surface, context.get("businessContext"))
+    ui_query_text = _build_ui_retrieval_query(ui_components, context.get("featureName"))
+    e2e_query_text = _build_e2e_retrieval_query(
+        context.get("businessContext"), context.get("featureName"), context.get("featureDescription")
+    )
+    business_query_text = _build_business_retrieval_query(
+        context.get("businessContext"), context.get("featureName"), context.get("featureDescription")
+    )
+    api_rag_context = _retrieve_category_context("api", api_query_text)
+    ui_rag_context = _retrieve_category_context("ui", ui_query_text)
+    e2e_rag_context = _retrieve_category_context("e2e", e2e_query_text)
+    # Business generation (both the primary combined E2E/edge/business call and the
+    # build_business_test_prompt() fallback) gets its own category retrieval, computed
+    # once here and reused by both call sites -- same "retrieve once per category per
+    # run" rule as api/ui/e2e above.
+    business_rag_context = _retrieve_category_context("business", business_query_text)
+
     log_progress(update_job_fn, "Fusion: analyzing previous and project test coverage", 28)
     project_tests = _project_existing_tests(store, project_id)
-    fusion = call_llm_json_with_repair(
-        llm, SYSTEM, build_fusion_pass_prompt(context, project_tests), max_tokens=6000
+    project_tests, fusion_tests_dropped = _bound_project_tests_for_fusion(
+        project_tests,
+        f"{context.get('featureName', '')} {context.get('featureDescription', '')}",
     )
+    if fusion_tests_dropped:
+        log_progress(
+            update_job_fn,
+            f"Fusion: {fusion_tests_dropped} project test case(s) left out of cross-"
+            "feature reuse analysis to keep the request within a safe size",
+            29,
+        )
+    inherited_reused = inherited_rebuilt = 0
+    errors = []
+    fusion = {}
+    try:
+        fusion = call_llm_json_with_repair(
+            llm, SYSTEM, build_fusion_pass_prompt(context, project_tests), max_tokens=6000
+        )
+    except Exception as exc:  # noqa: BLE001 -- Fusion is an optimization (cross-feature
+        # reuse detection), not a requirement for generating this feature's own tests.
+        # A failure here -- an oversized prompt the budget above didn't fully prevent, a
+        # transient provider error, anything -- must not take the whole run down; it
+        # degrades to "no inheritance candidates this run" and fresh generation
+        # continues normally, exactly like the E2E/business worker failures below
+        # already degrade instead of crashing the pipeline.
+        errors.append(f"Fusion pass failed: {exc}")
     context["summaries"]["alreadyCovered"] = str(fusion.get("already_covered_summary") or "")
     log_progress(
         update_job_fn,
@@ -812,8 +1461,6 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
         33,
     )
 
-    inherited_reused = inherited_rebuilt = 0
-    errors = []
     for reference in _as_list(fusion.get("inherited_tests")):
         if not isinstance(reference, dict):
             continue
@@ -847,6 +1494,19 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
                     ),
                     max_tokens=3500,
                 )
+                # The Fusion inheritance path persists directly, bypassing the suite
+                # filters every freshly generated case passes through -- it was the one
+                # route by which a model-written specific could reach the store
+                # unchecked. An adapted case is adapted TO this version, so this
+                # version's evidence is the right standard, and it is the same standard
+                # the rest of the run is held to.
+                if _unsupported_numeric_claims(repaired, corpus):
+                    errors.append(
+                        "Inherited test not carried over: the adapted version asserts "
+                        "specifics this version's evidence does not support "
+                        f"({original.get('title') or original.get('id')})"
+                    )
+                    continue
                 _persist_case(
                     store,
                     embedder,
@@ -862,7 +1522,18 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
 
     log_progress(update_job_fn, "DAG layer 1: generating API and UI tests", 38)
     api_chunks = _chunks(api_surface, 8) or [[]]
-    ui_chunks = [[], *_chunks(ui_components, 25)] if ui_components else [[]]
+    # UI generation is conditioned on UI evidence actually existing. When ui_components
+    # is empty -- Pass 1 grounded no UI element AND _derive_ui_components() found no
+    # control in the raw document -- the previous `else [[]]` still queued one UI worker
+    # whose prompt carried no UI subject at all, and a model asked for UI validations
+    # with nothing to ground against answers with standard-looking invented form rules
+    # (the field-length limits and button behavior found during live validation). That
+    # vector is closed here, at the source, instead of being filtered after the fact --
+    # and the otherwise-wasted LLM call is saved. When UI evidence DOES exist this is
+    # byte-for-byte the previous behavior (one broad worker plus one per component
+    # group), so genuine UI generation is untouched: an evidence-conditioned trigger,
+    # not a suppression of the UI category.
+    ui_chunks = [[], *_chunks(ui_components, 25)] if evidence_sufficient["ui"] else []
     jobs = []
     # These LLM calls run on ThreadPoolExecutor child threads; the token recorder
     # is thread-local, so bind the parent job's recorder inside each worker or the
@@ -871,7 +1542,9 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
 
     def run_api_worker(values, mode, max_tokens):
         usage.bind(_parent_rec)
-        prompt = build_api_agent_prompt(context, rag_context, values, mode)
+        prompt = build_api_agent_prompt(
+            context, api_rag_context, values, mode, top_k=_category_top_k("api", is_ollama)
+        )
         return call_llm_json_with_repair(
             llm,
             prompt["messages"][0]["content"],
@@ -882,7 +1555,9 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
 
     def run_ui_worker(chunk):
         usage.bind(_parent_rec)
-        prompt = build_ui_agent_prompt(context, chunk)
+        prompt = build_ui_agent_prompt(
+            context, chunk, ui_rag_context, top_k=_category_top_k("ui", is_ollama)
+        )
         return call_llm_json_with_repair(
             llm,
             prompt["messages"][0]["content"],
@@ -952,7 +1627,21 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
         e2e_result = call_llm_json_with_repair(
             llm,
             SYSTEM,
-            build_e2e_agent_prompt(context, api_surface[:80], ui_tests[:100], rag_context, len(api_surface)),
+            build_e2e_agent_prompt(
+                context, api_surface[:80], ui_tests[:100], e2e_rag_context, len(api_surface),
+                top_k=_category_top_k("e2e", is_ollama),
+                # edge_cases and business_tests are produced by this SAME call
+                # (build_e2e_agent_prompt's output has all three keys) but neither has
+                # its own worker/LLM call, so each gets its own labeled evidence block
+                # here instead of a dedicated retrieval call: edge_cases needs
+                # API/state-mutation evidence (not journey evidence), business_tests
+                # needs the business-category evidence also used by the
+                # build_business_test_prompt() fallback below.
+                api_rag_context=api_rag_context,
+                api_top_k=_category_top_k("api", is_ollama),
+                business_rag_context=business_rag_context,
+                business_top_k=_category_top_k("business", is_ollama),
+            ),
             max_tokens=10000,
             timeout_seconds=300,
         )
@@ -966,7 +1655,8 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
                 llm,
                 SYSTEM,
                 build_e2e_fallback_prompt(
-                    context, api_surface[:80], ui_tests[:100], rag_context
+                    context, api_surface[:80], ui_tests[:100], e2e_rag_context,
+                    top_k=_category_top_k("e2e", is_ollama),
                 ),
                 max_tokens=8000,
                 timeout_seconds=240,
@@ -983,11 +1673,26 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
             requirement_count,
             len(_as_list(business_context["prd"].get("requirements"))),
         )
-    acceptable_business_min = min(10, max(3, round(requirement_count * 0.6)))
+    # The floor exists to top a thin business suite up against a feature that HAS
+    # business rules to cover. When nothing business-shaped was extracted at all -- no
+    # requirement lines, no acceptance criteria, no user stories -- there is nothing to
+    # top up against, yet the unconditional max(3, ...) floor still fired this fallback:
+    # a second LLM call whose only possible output is invented business rules, on any
+    # feature whose documents happen to be purely technical. No evidence now means no
+    # floor, so the fallback does not run. A feature WITH business evidence keeps the
+    # previous floor formula and the previous behavior exactly.
+    acceptable_business_min = (
+        min(10, max(3, round(requirement_count * 0.6)))
+        if evidence_sufficient["business"] else 0
+    )
     if len(business_tests) < acceptable_business_min:
         try:
             fallback = call_llm_json_with_repair(
-                llm, SYSTEM, build_business_test_prompt(context), max_tokens=6000,
+                llm, SYSTEM,
+                build_business_test_prompt(
+                    context, business_rag_context, top_k=_category_top_k("business", is_ollama)
+                ),
+                max_tokens=6000,
                 timeout_seconds=240,
             )
             business_tests.extend(_as_list(fallback.get("business_tests")))
@@ -1027,7 +1732,16 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
                 SYSTEM,
                 build_repair_prompt({
                     "unifiedContext": context,
-                    "ragContext": rag_context,
+                    # Repair patches gaps across ALL FIVE suite types (api/ui/e2e/edge/
+                    # business) in one response, not one category -- so unlike the API/UI/
+                    # E2E generation prompts above it is deliberately NOT narrowed to a
+                    # single category's evidence, and its raw PRD block is left in place
+                    # (see build_repair_prompt()'s docstring for the full reasoning). Its
+                    # ragContext channel is still swapped from the broad `rag_context` to
+                    # `e2e_rag_context`, matching the explicit "E2E/fallback/repair -> E2E
+                    # retrieval context" grouping in the approved architecture.
+                    "ragContext": e2e_rag_context,
+                    "topK": _category_top_k("e2e", is_ollama),
                     "currentResult": hashed,
                     "ragValidation": {
                         "status": "needs_repair",
@@ -1049,6 +1763,16 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"RAG delta repair failed: {exc}")
+
+    # Category-agnostic content-level grounding guard (see _filter_ungrounded_claims'
+    # module comment): applied to every suite, after any repair-pass additions above,
+    # so fabricated content can't re-enter through that path either. Runs against the
+    # same broad `corpus` used for entities/API grounding -- preserves the existing
+    # broad-RAG-context-for-grounding architecture, adds no LLM call.
+    suites = {
+        name: _filter_ungrounded_claims(cases, corpus)
+        for name, cases in suites.items()
+    }
 
     suites = _budget_suites(
         suites, total, focus, smoke_mode=bool(params.get("smoke_mode"))
@@ -1099,6 +1823,42 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
         "rag_gap_count": len(gaps),
         "errors": errors,
     }
+    # "Either generate only what the evidence supports, or say the evidence was
+    # insufficient" -- this is that second branch made visible. An empty suite on the job
+    # is otherwise indistinguishable from "the model happened to return nothing", so the
+    # reason is reported explicitly, per category, with the count that actually survived:
+    # a category whose own call was skipped reports zero and why, while a category that
+    # rides another category's call (edge_cases) and still produced something is flagged
+    # for review rather than silently trusted.
+    if insufficient:
+        suite_of = {
+            "api": "api_tests", "ui": "ui_validations", "e2e": "e2e_tests",
+            "edge": "edge_cases", "business": "business_tests",
+        }
+        notes = []
+        for name in sorted(insufficient):
+            produced = len(suites.get(suite_of[name], []))
+            notes.append(
+                f"{name}: {produced} test(s) were generated although this feature's "
+                f"documents contain no dedicated {name} evidence -- review their "
+                "specifics before relying on them."
+                if produced else _insufficient_evidence_warning(name)
+            )
+        out["evidence_insufficient"] = sorted(insufficient)
+        out["warnings"] = (out.get("warnings") or []) + notes
+    # "Degrade gracefully with a warning rather than letting the request fail" -- the
+    # size budget above prevents the oversized-prompt failure, but silently dropping
+    # part of the project's test history from reuse analysis is still a real,
+    # user-visible change in what Fusion could see this run, so it is reported exactly
+    # like the evidence-insufficiency notes above rather than only appearing in logs.
+    if fusion_tests_dropped:
+        out["fusion_context_truncated"] = fusion_tests_dropped
+        out["warnings"] = (out.get("warnings") or []) + [
+            f"fusion: {fusion_tests_dropped} project test case(s) were left out of "
+            "cross-feature reuse analysis to keep the request within a safe size "
+            "(the most relevant ones for this feature were kept). Some reuse "
+            "opportunities in this large project may have been missed this run."
+        ]
     # Semantic dedup silently returns nothing when vector search is down and the case
     # store is too big for the in-memory fallback. Surface that on the job instead of
     # letting the run look clean — otherwise near-duplicates land with no warning.

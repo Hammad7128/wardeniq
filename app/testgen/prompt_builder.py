@@ -45,20 +45,20 @@ def build_version_transition_block(context: dict) -> str:
     impact_str = f"\nVERSION IMPACT SIGNALS:\n{json.dumps(impact, indent=2)}" if impact else ""
     return f"\nVERSION TRANSITION INTELLIGENCE:\n{summary or 'This generation is version-aware. Respect version changes before reusing coverage.'}{impact_str}\n"
 
-def build_rag_evidence_block(rag_context: dict | None) -> str:
+def build_rag_evidence_block(rag_context: dict | None, top_k: int = 8) -> str:
     if not rag_context or not isinstance(rag_context, dict):
         return "RAG EVIDENCE: none."
-    
+
     summary = str(rag_context.get("summary") or "").strip()
     summary = summary if summary else "No RAG summary available."
-    
+
     chunks = rag_context.get("retrieved_chunks") or []
     if not isinstance(chunks, list):
         chunks = []
-        
+
     if not chunks:
         return f"RAG SUMMARY:\n{summary}\n\nRAG CHUNKS: none retrieved."
-    
+
     # Sort chunks by score descending
     def get_score(c):
         val = c.get("finalScore")
@@ -71,7 +71,7 @@ def build_rag_evidence_block(rag_context: dict | None) -> str:
         except ValueError:
             return 0.0
 
-    sorted_chunks = sorted(chunks, key=get_score, reverse=True)[:8]
+    sorted_chunks = sorted(chunks, key=get_score, reverse=True)[:max(0, int(top_k or 8))]
     
     formatted = []
     for idx, chunk in enumerate(sorted_chunks):
@@ -600,15 +600,23 @@ Use the path format from the grounded entities above, not invented path formats.
   ]
 }}""".strip()
 
-def build_shared_context_block(context: dict, rag_context: dict, raw_api_spec: str | None) -> str:
-    prd = context.get("summaries", {}).get("prd") or ""
+def build_shared_context_block(context: dict, rag_context: dict, raw_api_spec: str | None, top_k: int = 8) -> str:
+    # NOTE: the raw context["summaries"]["prd"] text (near-full feature document) is
+    # intentionally NOT included below. Generation (API/UI workers, via this function)
+    # gets targeted evidence instead: the structured `requirements_block`/
+    # `technical_context` already extracted from the PRD, plus category-specific
+    # retrieved chunks in `rag_evidence`. This removes the duplicate bulk raw-text copy
+    # that generation used to receive alongside its RAG chunks; it does NOT touch
+    # context["summaries"]["prd"] itself, which extraction (Pass 0/1, via
+    # build_grounded_extraction_prompt/build_raw_api_spec_from_documents) still uses
+    # unchanged, in full.
     hld = context.get("summaries", {}).get("hld") or ""
     lld = context.get("summaries", {}).get("lld") or ""
     requirements_block = build_requirements_prompt_block(context)
     technical_context = context.get("technicalContext") or {}
-    rag_evidence = build_rag_evidence_block(rag_context)
+    rag_evidence = build_rag_evidence_block(rag_context, top_k)
     already_covered = context.get("summaries", {}).get("alreadyCovered") or ""
-    
+
     sibling_warning = f"""⛔ DO NOT GENERATE TESTS FOR THE FOLLOWING CONCEPTS — THEY ARE ALREADY COVERED BY SIBLING FEATURES:
 {already_covered}
 If you generate a test that overlaps with any concept above, it will be automatically rejected and invalidate your response.
@@ -619,9 +627,6 @@ If you generate a test that overlaps with any concept above, it will be automati
     return "\n".join([
         f"FEATURE NAME: {context.get('featureName', 'Unnamed Feature')}",
         f"FEATURE DESCRIPTION: {context.get('featureDescription', '')}",
-        "",
-        "REQUIREMENT EVIDENCE:",
-        prd,
         "",
         "ARCHITECTURE EVIDENCE:",
         hld,
@@ -913,7 +918,8 @@ def build_api_agent_prompt(
     context: dict,
     rag_context: dict,
     target_chunk: list = None,
-    focus_mode: str = 'happy'
+    focus_mode: str = 'happy',
+    top_k: int = 8,
 ) -> dict:
     if target_chunk is None:
         target_chunk = []
@@ -948,7 +954,7 @@ def build_api_agent_prompt(
     
     max_tests = min(raw_ceiling, focus_ceilings.get(focus_mode, 5))
     
-    system_content = build_shared_context_block(context, rag_context, context.get("rawApiSpec"))
+    system_content = build_shared_context_block(context, rag_context, context.get("rawApiSpec"), top_k)
     user_content = build_api_agent_task_prompt(
         target_chunk,
         focus_mode,
@@ -965,7 +971,12 @@ def build_api_agent_prompt(
         ]
     }
 
-def build_ui_agent_prompt(context: dict, target_chunk: list = None) -> dict:
+def build_ui_agent_prompt(
+    context: dict,
+    target_chunk: list = None,
+    rag_context: dict = None,
+    top_k: int = 8,
+) -> dict:
     if target_chunk is None:
         target_chunk = []
     figma = context.get("summaries", {}).get("figma") or {}
@@ -1063,8 +1074,12 @@ The values below are examples — replace each one with a real value from the ev
   ]
 }}""".strip()
 
-    system_content = build_shared_context_block(context, {}, context.get("rawApiSpec"))
-    
+    # Previously this always passed {} as its rag_context -- UI generation received no
+    # retrieved evidence at all. It now receives the UI-category retrieval context
+    # (search_feature_chunks() results built from a UI-specific query) like the API and
+    # E2E workers already did.
+    system_content = build_shared_context_block(context, rag_context or {}, context.get("rawApiSpec"), top_k)
+
     return {
         "messages": [
             {"role": "system", "content": system_content},
@@ -1077,12 +1092,32 @@ def build_e2e_agent_prompt(
     pruned_api_dictionary: list,
     pruned_ui_dictionary: list,
     rag_context: dict,
-    discovered_api_surface: int = None
+    discovered_api_surface: int = None,
+    top_k: int = 6,
+    api_rag_context: dict = None,
+    api_top_k: int = 8,
+    business_rag_context: dict = None,
+    business_top_k: int = 6,
 ) -> str:
-    prd = context.get("summaries", {}).get("prd") or ""
+    # Raw context["summaries"]["prd"] is intentionally not read here -- see the note in
+    # build_shared_context_block(). This function still gets full structured
+    # business_context evidence (below) plus category-specific RAG chunks; it just no
+    # longer duplicates the entire raw PRD text as a fourth copy of the same evidence.
+    #
+    # This one call produces THREE suite types (e2e_tests, edge_cases, business_tests),
+    # each with a different evidence need, so each gets its OWN labeled retrieved-
+    # evidence block instead of one shared one:
+    #  - e2e_tests   -> `rag_context` (E2E/journey retrieval) -- unchanged from before.
+    #  - edge_cases  -> `api_rag_context`, the SAME retrieval already computed for the
+    #    api_tests category (no new retrieval call). Edge cases are state-corruption
+    #    scenarios on mutating endpoints, i.e. API/state evidence, not journey evidence.
+    #  - business_tests -> `business_rag_context`, a dedicated business-category
+    #    retrieval also reused by build_business_test_prompt()'s fallback below.
     hld = context.get("summaries", {}).get("hld") or ""
     business_context = context.get("businessContext") or {}
-    rag_evidence = build_rag_evidence_block(rag_context)
+    rag_evidence = build_rag_evidence_block(rag_context, top_k)
+    api_edge_evidence = build_rag_evidence_block(api_rag_context, api_top_k)
+    business_evidence = build_rag_evidence_block(business_rag_context, business_top_k)
     api_count = len(pruned_api_dictionary)
     
     if discovered_api_surface is None:
@@ -1171,10 +1206,11 @@ CURATED CROSS-FEATURE E2E JOURNEYS (premium graph hints, use only if directly su
 {json.dumps(cross_feature_journeys, indent=2) if cross_feature_journeys else '[]'}
 
 EVIDENCE POOL:
-BUSINESS RULES: {json.dumps(business_context, indent=2)}
-REQUIREMENT EVIDENCE: {prd}
+BUSINESS RULES (structured): {json.dumps(business_context, indent=2)}
 ARCHITECTURE EVIDENCE: {hld}
-RAG EVIDENCE: {rag_evidence}
+E2E/JOURNEY RETRIEVED EVIDENCE (use this for e2e_tests only): {rag_evidence}
+API/STATE-MUTATION RETRIEVED EVIDENCE (use this for edge_cases only — state-corruption scenarios on mutating endpoints, NOT for e2e_tests or business_tests): {api_edge_evidence}
+BUSINESS RULE RETRIEVED EVIDENCE (use this for business_tests only): {business_evidence}
 
 OUTPUT SCHEMA:
 The JSON object has exactly three keys: "e2e_tests", "edge_cases", "business_tests".
@@ -1249,11 +1285,14 @@ def build_e2e_fallback_prompt(
     context: dict,
     api_dictionary: list,
     ui_dictionary: list,
-    rag_context: dict
+    rag_context: dict,
+    top_k: int = 6,
 ) -> str:
-    prd = context.get("summaries", {}).get("prd") or ""
+    # Raw context["summaries"]["prd"] intentionally not read here -- see the note in
+    # build_shared_context_block(). API/UI dictionaries plus category-specific RAG
+    # chunks below are the targeted evidence this fallback pass needs.
     hld = context.get("summaries", {}).get("hld") or ""
-    rag_evidence = build_rag_evidence_block(rag_context)
+    rag_evidence = build_rag_evidence_block(rag_context, top_k)
     
     max_e2e = min(max(math.ceil(len(api_dictionary) / 3), 6), 12)
     min_e2e = min(max_e2e, max(5, math.ceil(max_e2e * 0.5)))
@@ -1299,7 +1338,6 @@ CURATED CROSS-FEATURE E2E JOURNEYS (premium graph hints, optional and capped):
 
 EVIDENCE POOL:
 FEATURE NAME: {context.get("featureName", "Unnamed Feature")}
-REQUIREMENT EVIDENCE: {prd}
 ARCHITECTURE EVIDENCE: {hld}
 RAG EVIDENCE: {rag_evidence}
 
@@ -1333,14 +1371,33 @@ The values below are examples - replace each one with real values from the evide
   ]
 }}""".strip()
 
-def build_business_test_prompt(context: dict) -> str:
-    prd_text = context.get("summaries", {}).get("prd") or ""
-    business_rules = context.get("businessContext", {}).get("prd", {}).get("requirements") or []
+def build_business_test_prompt(context: dict, rag_context: dict = None, top_k: int = 6) -> str:
+    # Raw context["summaries"]["prd"] is intentionally not read here -- mirrors the
+    # redundant-bulk-text removal already applied to build_shared_context_block() /
+    # build_e2e_agent_prompt() / build_e2e_fallback_prompt(). The structured
+    # businessContext (already-extracted requirement/acceptance-criteria/user-story
+    # lines) plus this category's retrieved evidence below is the targeted evidence
+    # this generator needs; it does not need a fourth copy of the raw document.
+    business_context = context.get("businessContext") or {}
+    # businessContext can be the flat shape extract_business_context() actually returns
+    # (requirements/acceptanceCriteria/... at the top level) or a {"prd": {...}} nested
+    # variant some call sites (and test fixtures) use -- same dual-shape handling as
+    # _build_business_retrieval_query()/_build_e2e_retrieval_query() in testgen.service.
+    # NOTE: this function previously read ONLY the nested "prd" shape here, which is
+    # never what the real pipeline's build_unified_context() produces (it returns the
+    # flat shape) -- so `business_rules` was always empty in production, silently
+    # falling back to the "count the rules yourself" instruction below and a fixed
+    # ceiling of 10. Fixed as part of this change since it directly undermines "use the
+    # already-extracted structured context" for this exact function.
+    prd_block = business_context.get("prd")
+    rules_source = prd_block if isinstance(prd_block, dict) else business_context
+    business_rules = rules_source.get("requirements") or []
     if not isinstance(business_rules, list):
         business_rules = []
-        
+    rag_evidence = build_rag_evidence_block(rag_context, top_k)
+
     max_tests = len(business_rules) if business_rules else 10
-    count_instruction = f"The requirement evidence contains {len(business_rules)} distinct rules. Generate exactly {len(business_rules)} tests — one per rule." if business_rules else "Count the distinct rules in the requirement evidence below. Generate exactly one test per rule. Do not group rules together."
+    count_instruction = f"The requirement evidence contains {len(business_rules)} distinct rules. Generate exactly {len(business_rules)} tests — one per rule." if business_rules else "Count the distinct rules in the evidence below. Generate exactly one test per rule. Do not group rules together."
 
     return f"""{output_contract_header('Generate one business rule test per requirement rule')}
 
@@ -1355,17 +1412,17 @@ FIELD VALUE RULES — violations make the entire response invalid:
 - The "steps" array must contain at least 3 items following Given / When / Then format.
 - The "steps" array must use objects with "content" and a concise one-line "expectedResult" for every step that can show an observable outcome. Keep the top-level "expected_result" as the whole-test outcome only.
 
-OUTPUT CEILING: Output at most {max_tests} tests. Generating a test for a topic not stated in the requirement evidence below also makes the response invalid.
+OUTPUT CEILING: Output at most {max_tests} tests. Generating a test for a topic not stated in the evidence below also makes the response invalid.
 
-BUSINESS CONTEXT:
-{json.dumps(context.get("businessContext") or {}, indent=2)}
+BUSINESS CONTEXT (structured — authoritative for which rules exist):
+{json.dumps(business_context, indent=2)}
 
-REQUIREMENT EVIDENCE (authoritative — test only rules stated here):
-{prd_text}
+RETRIEVED EVIDENCE (business-category retrieval — supporting detail for the rules above):
+{rag_evidence}
 
 OUTPUT SCHEMA:
 The JSON object has exactly one key: "business_tests".
-The values below are examples — replace each one with a real value from the requirement evidence above.
+The values below are examples — replace each one with a real value from the evidence above.
 
 {{
   "business_tests": [
@@ -1395,15 +1452,23 @@ The values below are examples — replace each one with a real value from the re
 }}""".strip()
 
 def build_repair_prompt(params: dict) -> str:
+    # Unlike the API/UI/E2E generation prompts above, this one is NOT narrowed to a
+    # single category: it patches deltas across all five suite types (api/ui/e2e/edge/
+    # business) in one response, so it keeps the full raw PRD text as broad evidence
+    # rather than one category's targeted retrieval. Its "ragContext" is still swapped
+    # by the caller (testgen.service) from the broad extraction/grounding rag_context to
+    # e2e_rag_context, per the approved "E2E/fallback/repair -> E2E retrieval context"
+    # grouping -- "topK" lets the caller pass that category's configured K through.
     unified_context = params.get("unifiedContext") or {}
     rag_context = params.get("ragContext") or {}
     rag_validation = params.get("ragValidation") or {}
-    
+    top_k = params.get("topK", 8)
+
     prd = unified_context.get("summaries", {}).get("prd") or ""
     hld = unified_context.get("summaries", {}).get("hld") or ""
     lld = unified_context.get("summaries", {}).get("lld") or ""
     figma_block = build_compact_figma_prompt_block(unified_context.get("summaries", {}).get("figma") or {})
-    rag_evidence = build_rag_evidence_block(rag_context)
+    rag_evidence = build_rag_evidence_block(rag_context, top_k)
     requirements_block = build_requirements_prompt_block(unified_context)
     technical_context = unified_context.get("technicalContext") or {}
     already_covered = unified_context.get("summaries", {}).get("alreadyCovered") or ""

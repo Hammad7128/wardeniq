@@ -666,7 +666,7 @@ function watchGen(jobId, fid) {
         ? `<span class="muted">${esc(j.stage)}</span> — ${line}`
         : j.status === "failed"
           ? `<span class="err">✕ Generation failed: ${esc(j.error || "unknown error")}</span>`
-          : `<span class="ok">✓ Done</span> — ${line}${res.errors && res.errors.length ? `<br><span class="err">${esc(res.errors.join("; "))}</span>` : ""}`;
+          : `<span class="ok">✓ Done</span> — ${line}${res.warnings && res.warnings.length ? `<br><span class="warn">${esc(res.warnings.join("; "))}</span>` : ""}${res.errors && res.errors.length ? `<br><span class="err">${esc(res.errors.join("; "))}</span>` : ""}`;
     if (j.status !== "running") {
       $("#f-go").disabled = false;
       setBusy("#f-go", false);

@@ -165,7 +165,15 @@ def generate_test_slug(test: dict) -> str:
     return f"gen|{category}|{intent_slug}"
 
 def normalize_endpoint(endpoint) -> str:
-    endpoint = str(endpoint or '').lower().strip().rstrip('/')
+    # Strip stray markdown/punctuation wrapper characters (e.g. a trailing backtick
+    # left over from a "`POST /path`" inline-code span in source PRD text) before
+    # the rest of normalization -- otherwise a markdown-wrapped and a clean
+    # extraction of the SAME endpoint hash to different keys here, so no dedup
+    # anywhere that keys off this function (testgen/service.py's _api_key() /
+    # _merge_api_candidates(), and the lineage matching below) ever catches it.
+    # See testgen/service.py's _clean_endpoint() for the companion extraction-site
+    # fix (needed too: this only fixes the DEDUP KEY, not the stored raw string).
+    endpoint = str(endpoint or '').strip().strip('`*\'"').lower().rstrip('/')
     endpoint = re.sub(r'/[0-9a-f-]{36}', '/{id}', endpoint)
     endpoint = re.sub(r'/\d+', '/{id}', endpoint)
     return endpoint

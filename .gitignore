@@ -30,6 +30,9 @@ build/
 .mypy_cache/
 .ruff_cache/
 
+
+graphify-out/
+
 # built React SPA — produced by the frontend build / Docker image, not tracked
 app/static-react/
 frontend/.vite/
