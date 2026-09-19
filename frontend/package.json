@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint src --ext .jsx --report-unused-disable-directives --max-warnings 0",
+    "test": "node --test tests/bootStatus.test.mjs",
     "check": "npm run lint && npm run build"
   },
   "dependencies": {
