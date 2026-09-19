@@ -184,14 +184,46 @@ def source_files_from_tar(data: bytes, max_files=400, max_bytes=40000, return_st
     return out
 
 
+SUPPORTED_DOC_FORMATS = "PDF, DOCX, Markdown, and plain text"
+
+
+class UnsupportedDocumentError(ValueError):
+    """Raised when an upload is binary (or otherwise not a supported text format)."""
+
+
+def _guess_binary_kind(data: bytes) -> str | None:
+    """Best-effort name for a few common office/binary containers."""
+    if data.startswith(b"PK") or data.startswith(b"PK") or data.startswith(b"PK"):
+        return "Office Open XML / ZIP archive (e.g. .xlsx, .pptx, .odt)"
+    if data.startswith(b"ÐÏà"):
+        return "legacy OLE document (e.g. .doc, .xls)"
+    if data.startswith(b"%PDF"):
+        return "PDF"
+    return None
+
+
 def extract_text(filename: str, data: bytes) -> str:
     name = (filename or "").lower()
     if name.endswith(".pdf"):
         return _pdf(data)
     if name.endswith(".docx"):
         return _docx(data)
-    # md / txt / anything else -> decode as text
-    return data.decode("utf-8", errors="replace")
+    # md / txt / other text-like uploads. Sniff known binary containers
+    # first: ZIP/OLE magic is valid UTF-8, so a strict decode alone would
+    # still accept .xlsx / .doc and turn them into garbage later.
+    kind = _guess_binary_kind(data)
+    if kind:
+        raise UnsupportedDocumentError(
+            f"Unsupported file format for {filename or 'upload'}. Detected {kind}. "
+            f"Supported formats: {SUPPORTED_DOC_FORMATS}."
+        )
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise UnsupportedDocumentError(
+            f"Unsupported file format for {filename or 'upload'}. "
+            f"Supported formats: {SUPPORTED_DOC_FORMATS}."
+        ) from exc
 
 
 def _pdf(data: bytes) -> str:
