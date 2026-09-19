@@ -1074,6 +1074,116 @@ window.clickBreadcrumb = function (stepId) {
 };
 
 // ---- status ----
+// Human-readable Vector Search copy from app/core/bootstrap.py (_SEARCH_REQUIRED_MSG).
+// Shown when boot failed but the API still has a raw driver exception in boot.detail.
+const BOOT_VECTOR_SEARCH_MSG =
+  "wardenIQ requires a MongoDB with Vector Search — it's where embeddings are searched. The database at MONGO_URI doesn't have it. Use MongoDB Atlas (search built in) or a self-managed MongoDB running mongot, then restart.";
+const BOOT_SAFE_DETAIL_MARKERS = [
+  "requires a MongoDB with Vector Search",
+  "doesn't allow enough search indexes",
+  "insecure APP_SECRET",
+  "insecure production configuration",
+];
+
+function looksLikeRawBootDetail(detail) {
+  const d = String(detail || "");
+  if (!d) return false;
+  if (BOOT_SAFE_DETAIL_MARKERS.some((m) => d.includes(m))) return false;
+  return (
+    /^index retry:/i.test(d) ||
+    /^job recovery:/i.test(d) ||
+    /^migrate:/i.test(d) ||
+    /^admin seed:/i.test(d) ||
+    /^admin password seed:/i.test(d) ||
+    /full error:/i.test(d) ||
+    /msgLen/i.test(d) ||
+    /ProtocolError/i.test(d) ||
+    /codeName/i.test(d) ||
+    /\$clusterTime/.test(d) ||
+    /Timestamp\(/.test(d) ||
+    /pymongo/i.test(d) ||
+    /Traceback \(most recent call last\)/i.test(d) ||
+    /ServerSelectionTimeoutError/i.test(d) ||
+    /AutoReconnect/i.test(d) ||
+    /OperationFailure/i.test(d) ||
+    /recv\(\):/i.test(d) ||
+    /\{\s*['"]ok['"]\s*:/.test(d)
+  );
+}
+
+function formatBootStatus(boot) {
+  boot = boot || {};
+  const stage = String(boot.stage || "");
+  const detail = String(boot.detail || "");
+  if (boot.ready) return { visible: false, kind: "ok", summary: "", raw: "" };
+
+  const raw = looksLikeRawBootDetail(detail) ? detail : "";
+  const safeDetail = raw ? "" : detail;
+
+  if (stage === "error") {
+    return {
+      visible: true,
+      kind: "error",
+      summary: safeDetail || BOOT_VECTOR_SEARCH_MSG,
+      raw,
+    };
+  }
+  if (stage === "indexing") {
+    return {
+      visible: true,
+      kind: "warn",
+      summary: "Setting up Vector Search indexes…",
+      raw: detail,
+    };
+  }
+  if (stage === "connecting") {
+    return {
+      visible: true,
+      kind: "warn",
+      summary: "Connecting to MongoDB…",
+      raw: detail,
+    };
+  }
+  return {
+    visible: true,
+    kind: "warn",
+    summary: stage ? `Starting up (${stage})` : "Starting up…",
+    raw: raw || "",
+  };
+}
+
+function bootBannerDetailsHtml(raw) {
+  if (!raw) return "";
+  return (
+    `<details class="boot-banner-details">` +
+    `<summary>Details</summary>` +
+    `<pre class="boot-banner-raw">${esc(raw)}</pre>` +
+    `</details>`
+  );
+}
+
+function applyBootBanner(formatted) {
+  const el = $("#boot-banner");
+  if (!el) return;
+  if (!formatted || !formatted.visible) {
+    el.hidden = true;
+    el.innerHTML = "";
+    el.removeAttribute("data-kind");
+    return;
+  }
+  el.hidden = false;
+  el.dataset.kind = formatted.kind || "warn";
+  if (formatted.raw) {
+    try {
+      console.warn("[wardenIQ] boot detail:", formatted.raw);
+    } catch (e) {}
+  }
+  const icon = formatted.kind === "error" ? "⚠" : "●";
+  el.innerHTML =
+    `<span class="boot-banner-msg">${icon} ${esc(formatted.summary)}</span>` +
+    bootBannerDetailsHtml(formatted.raw);
+}
+
 async function refreshStatus() {
   if ($("#status") && !$("#status").dataset.loaded)
     $("#status").innerHTML =
@@ -1082,20 +1192,29 @@ async function refreshStatus() {
     const s = await api("/api/status");
     const c = s.counts || {};
     if ($("#status")) $("#status").dataset.loaded = "1";
+    // Keep #status to compact service chips only — long boot copy belongs in
+    // the in-flow #boot-banner so it cannot overlay the sticky header chrome.
     $("#status").innerHTML =
       `<span class="status-group">` +
       `<span class="stat" title="MongoDB connection">${dot(s.mongo_connected)}Mongo</span>` +
       `<span class="stat" title="Embeddings: ${esc(s.embedding?.provider || "")}${s.embedding?.dims ? " · " + s.embedding.dims + "-d" : ""}${s.embedding?.health?.error ? " · " + s.embedding.health.error : ""}">${dot(s.embedding?.health?.ok)}${esc(s.embedding?.model)}</span>` +
       `<span class="stat" title="LLM: ${esc(s.llm?.health?.error || s.llm?.provider || "")}">${dot(s.llm?.health?.ok)}${esc(s.llm?.model)}</span>` +
       `</span>` +
-      `<span class="stat-metric" title="Features and test cases in scope"><span><b>${c.features || 0}</b> features</span><span class="sep"></span><span><b>${c.test_cases || 0}</b> cases</span></span>` +
-      (s.boot?.ready
-        ? ""
-        : s.boot?.stage === "error"
-          ? `<span class="err" title="${esc(s.boot?.detail || "")}">⚠ ${esc(s.boot?.detail || "startup error")}</span>`
-          : `<span class="stat" style="color:var(--amber)">${dot(false)}${esc(s.boot?.stage || "")}${s.boot?.detail ? ` · ${esc(s.boot.detail)}` : ""}</span>`);
+      `<span class="stat-metric" title="Features and test cases in scope"><span><b>${c.features || 0}</b> features</span><span class="sep"></span><span><b>${c.test_cases || 0}</b> cases</span></span>`;
+    applyBootBanner(formatBootStatus(s.boot));
   } catch (e) {
-    $("#status").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    const raw = e && e.message ? String(e.message) : "";
+    applyBootBanner({
+      visible: true,
+      kind: "error",
+      summary: looksLikeRawBootDetail(raw)
+        ? "Can't load service status right now."
+        : raw || "Can't load service status right now.",
+      raw: looksLikeRawBootDetail(raw) ? raw : "",
+    });
+    if ($("#status") && !$("#status").dataset.loaded) {
+      $("#status").innerHTML = `<span class="stat">${dot(false)}Status unavailable</span>`;
+    }
   }
 }
 const dot = (ok) => `<span class="dot ${ok ? "ok" : "bad"}"></span>`;

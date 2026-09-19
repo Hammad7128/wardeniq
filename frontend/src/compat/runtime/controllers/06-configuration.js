@@ -193,13 +193,14 @@ async function loadDbStatus() {
     const d = await api("/api/db-status");
     const boot = d.boot || {};
     const err = boot.stage === "error";
+    const bootMsg = formatBootStatus(boot);
     // Show only the connection status; the URL input below is always available.
     const rows = [];
     rows.push(
       dbRow(
         "Connection",
         err
-          ? `<span class="err">⚠ ${esc(boot.detail || "not ready")}</span>`
+          ? `<span class="err">⚠ ${esc(bootMsg.summary || "not ready")}</span>${bootBannerDetailsHtml(bootMsg.raw)}`
           : boot.ready
             ? `<span class="ok">● connected</span>`
             : `<span class="warn">● ${esc(boot.stage || "starting")}</span>`,

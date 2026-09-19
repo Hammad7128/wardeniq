@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Fixed
+- **Boot / Vector Search failure copy no longer overlays the sticky header.** Long
+  `boot.detail` text was injected into absolutely-centered `#status` (`min-width:
+  max-content` + `nowrap`), covering the logo, page title, and Sign out / Change
+  password. Non-ready boot messaging now renders in a wrapping document-flow
+  banner above the header; `#status` keeps compact service chips only. Raw driver
+  exceptions are not the primary visible text — they sit behind a Details control
+  (and the console).
 - **A saved Jira (or LLM/SMTP) integration could silently disappear later, with
   no error at save time and no sign-out in between.** `app/store/base.py`
   connected to MongoDB with pymongo's default write concern (`w=1`,
