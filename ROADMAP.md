@@ -34,7 +34,23 @@ looking legitimate and inflates your coverage. Fixing this matters more than any
 start on Docker Desktop with a kernel ≥ 6.19, and `run.sh` exits 0 while it fails. A new user
 gets a success-looking run and a dead `localhost:8001`.
 
-Also in scope: the boot banner covering the header including Sign out
+**Datastore.** [#41](https://github.com/adlerqa/wardeniq/issues/41) — validate the stack on
+**Percona Server for MongoDB + Percona Search** (Percona's mongot fork). Today wardenIQ needs 6
+search indexes; Atlas free M0 allows 3, so evaluating us effectively requires a paid M10+ tier.
+Percona should remove that cap, likely sidesteps the kernel guard in #27, and avoids tying
+embedding choice to a single vendor — which matters because bring-your-own-model is a stated
+principle. `config/mongod.conf` notes the project migrated *from* Percona, so this is a return
+with known ground, not a new bet. It's in technical preview, so the work is validation first.
+
+**Measurement.** [#42](https://github.com/adlerqa/wardeniq/issues/42) — publish a generation
+quality benchmark (groundedness, exemplar leakage, coverage recall). We assert grounded output;
+we should measure it, and gate CI on it so #36 can't regress silently.
+[#43](https://github.com/adlerqa/wardeniq/issues/43) revisits the bundled model default on the
+back of those numbers.
+
+Also in scope: [#44](https://github.com/adlerqa/wardeniq/issues/44) — the sign-in screen is the
+one place a boot failure *isn't* shown, which is exactly where you're stuck — the boot banner
+covering the header including Sign out
 ([#34](https://github.com/adlerqa/wardeniq/issues/34)), README screenshots and a demo GIF
 ([#11](https://github.com/adlerqa/wardeniq/issues/11)) — the README currently has no images at
 all — an example PRD so a first run needs no document of your own
@@ -85,6 +101,15 @@ no `logging` import anywhere), self-hosted GitLab support
 cost estimation before a generation run
 ([#22](https://github.com/adlerqa/wardeniq/issues/22)), and container healthchecks
 ([#25](https://github.com/adlerqa/wardeniq/issues/25)).
+
+Product work that makes wardenIQ something you're *told by* rather than somewhere you go:
+coverage trends over time ([#45](https://github.com/adlerqa/wardeniq/issues/45) — the dashboard
+is point-in-time, and "is this getting better?" is the question leads actually ask), requirement
+drift detection ([#46](https://github.com/adlerqa/wardeniq/issues/46) — when a PRD changes, which
+existing cases just went stale?), outbound notifications to Slack/Teams/webhooks
+([#47](https://github.com/adlerqa/wardeniq/issues/47)), and generation latency
+([#48](https://github.com/adlerqa/wardeniq/issues/48) — multi-pass generation takes minutes, and
+speed decides whether people run it on every change or occasionally).
 
 ---
 
