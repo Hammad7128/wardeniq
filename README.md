@@ -13,7 +13,7 @@
 **`v0.1.0-beta`** — early, evolving, open. Licensed **MIT**: fork it, run it
 on-prem, use it commercially, no strings.
 
-<!-- TODO(#11): demo GIF goes here — upload a PRD, generation runs, cases appear -->
+![wardenIQ dashboard — coverage and automation rollups across projects](docs/assets/dashboard.png)
 
 ---
 
@@ -65,6 +65,11 @@ is also available if you just want to try it out first — see
   a per-feature **PDF report**.
 
 ---
+
+Generated cases land in a reviewable, filterable library — each one typed, prioritised, and
+built from atomic steps you can edit once and reuse everywhere:
+
+![Test Cases — generated suite with type, step count and execution status](docs/assets/test-cases.png)
 
 ---
 
@@ -141,6 +146,11 @@ Prefer to seed the admin ahead of time? Set `ADMIN_EMAIL=you@company.com` in `.e
 > active admin exists.
 
 ---
+
+Bring your own model — Ollama, OpenAI, Anthropic, Gemini, Mistral, Groq or Bedrock, all
+configured in the same place:
+
+![Configuration — LLM provider, model and embedding settings](docs/assets/configuration.png)
 
 > **Running this for real?** Don't use the bundled stack. Point wardenIQ at a cloud
 > MongoDB and a hosted LLM and the only thing you run is the app container itself.
