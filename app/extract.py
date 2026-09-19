@@ -195,7 +195,7 @@ def _guess_binary_kind(data: bytes) -> str | None:
     """Best-effort name for a few common office/binary containers."""
     if data.startswith(b"PK") or data.startswith(b"PK") or data.startswith(b"PK"):
         return "Office Open XML / ZIP archive (e.g. .xlsx, .pptx, .odt)"
-    if data.startswith(b"ÐÏà"):
+    if data.startswith(b"\xd0\xcf\x11\xe0"):
         return "legacy OLE document (e.g. .doc, .xls)"
     if data.startswith(b"%PDF"):
         return "PDF"
