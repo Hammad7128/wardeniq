@@ -13,7 +13,9 @@
 **`v0.1.0-beta`** — early, evolving, open. Licensed **MIT**: fork it, run it
 on-prem, use it commercially, no strings.
 
-![wardenIQ dashboard — coverage and automation rollups across projects](docs/assets/dashboard.png)
+![Upload a PRD, wardenIQ generates a grounded test suite](docs/assets/demo.gif)
+
+<sub>Create a project, attach a PRD, and wardenIQ generates a typed test suite from it — functional, E2E, API and non-functional.</sub>
 
 ---
 
@@ -65,6 +67,10 @@ is also available if you just want to try it out first — see
   a per-feature **PDF report**.
 
 ---
+
+A dashboard rolls coverage and automation up across every project:
+
+![wardenIQ dashboard — coverage and automation rollups across projects](docs/assets/dashboard.png)
 
 Generated cases land in a reviewable, filterable library — each one typed, prioritised, and
 built from atomic steps you can edit once and reuse everywhere:
