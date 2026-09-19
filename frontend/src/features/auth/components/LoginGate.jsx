@@ -200,6 +200,14 @@ export default function LoginGate() {
             </div>
           </div>
 
+          <div
+            id="login-boot-status"
+            hidden
+            role="status"
+            aria-live="polite"
+            className="mb-6 rounded-lg border border-amber-400/30 bg-amber-400/10 p-4 text-[12.5px] leading-5 text-amber-200 break-words"
+          />
+
           {/* Main title */}
           <div className="mb-7 text-center">
             <h1 className="m-0 text-[22px] font-semibold tracking-[-0.025em] text-slate-100">

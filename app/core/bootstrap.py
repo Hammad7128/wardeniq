@@ -28,6 +28,25 @@ from core.state import store  # noqa: F401  (bare name-import is safe: store is
 BOOT = {"stage": "starting", "ready": False, "detail": ""}
 
 
+def public_boot_status():
+    """Only operator-facing copy may cross the unauthenticated boundary.
+
+    `detail` can contain arbitrary driver errors, URIs and credentials. Never
+    return it here, even for an unknown/new failure mode.
+    """
+    boot = BOOT.copy()
+    stage = boot["stage"]
+    detail = {
+        "starting": "wardenIQ is starting. Please wait.",
+        "connecting": "Connecting to MongoDB. If this persists, check MONGO_URI and database availability, then restart.",
+        "indexing": "Preparing MongoDB search indexes. If this persists, check that mongot or Atlas Search is available.",
+    }.get(stage, "wardenIQ could not finish starting. Check the server logs and restart after fixing the problem.")
+    if stage == "error":
+        detail = boot.get("public_detail") or detail
+    return {"stage": stage, "ready": boot["ready"],
+            "detail": "" if boot["ready"] else detail}
+
+
 def _ensure_app_secret():
     """Zero-config first run: if no real secret has been configured at all, generate a
     strong one automatically and persist it into .env, so a first-time user never has
@@ -163,6 +182,7 @@ def _check_app_secret():
            "stored secrets — a weak value is a critical vulnerability.")
     if not ALLOW_WEAK_SECRET:
         BOOT.update(stage="error", ready=False,
+                    public_detail="APP_SECRET is missing or insecure. Set a strong APP_SECRET and restart.",
                     detail=f"insecure APP_SECRET: {msg} Set a strong APP_SECRET "
                            "(or ALLOW_WEAK_SECRET=true for a trusted local run).")
         raise RuntimeError(f"[wardenIQ] refusing to start — {msg}")
@@ -188,7 +208,7 @@ def _check_production_posture():
     if problems:
         detail = ("insecure production configuration: " + "; ".join(problems) +
                   ". Fix these, or unset APP_ENV=production for a local run.")
-        BOOT.update(stage="error", ready=False, detail=detail)
+        BOOT.update(stage="error", ready=False, detail=detail, public_detail=detail)
         raise RuntimeError(f"[wardenIQ] refusing to start — {detail}")
 
 
@@ -265,7 +285,7 @@ def bootstrap():
             else:
                 detail = _SEARCH_REQUIRED_MSG
                 reason = "Vector Search unavailable"
-            BOOT.update(stage="error", ready=False, detail=detail)
+            BOOT.update(stage="error", ready=False, detail=detail, public_detail=detail)
             print(f"[wardenIQ] refusing to serve — {reason}: {idx_err}", flush=True)
             return
     # Adopt features created before project_id existed into a default project.

@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from api.schemas import OtpRequestIn
 from core.audit import _audit
+from core.bootstrap import public_boot_status
 from core.config import (
     APP_WORKSPACE_NAME, DEFAULT_ADMIN_PASSWORD, OTP_MAX_PER_WINDOW,
     OTP_WINDOW_SECONDS,
@@ -202,6 +203,32 @@ def smtp_status():
     return {"smtp_setup": cfg is not None}
 
 
+_NO_USERS_MESSAGE = (
+    "No user accounts exist. Run scripts/reset-admin-password.sh from the "
+    "installation directory to create the admin account and set its password. "
+    "This also works when bootstrap stops before creating the admin."
+)
+_DATABASE_UNAVAILABLE_MESSAGE = (
+    "Unable to check user accounts. Check MongoDB connectivity and the server logs, then try again."
+)
+
+
+@router.get("/api/auth/boot-status")
+def boot_status(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    status = public_boot_status()
+    status.update(users_empty=None, recovery="")
+    if not status["ready"]:
+        try:
+            status["users_empty"] = not store.has_users()
+        except Exception:  # DB unavailable is unknown, not an empty collection.
+            status["recovery"] = _DATABASE_UNAVAILABLE_MESSAGE
+        else:
+            if status["users_empty"]:
+                status["recovery"] = _NO_USERS_MESSAGE
+    return status
+
+
 class LoginPasswordIn(BaseModel):
     username: str
     password: str
@@ -230,6 +257,13 @@ def login_password(body: LoginPasswordIn, response: Response):
         # account costs the same time as a wrong password (no user enumeration).
         auth.password_matches(_DUMMY_PASSWORD_HASH, password)
         if username.lower() != "admin" or password != DEFAULT_ADMIN_PASSWORD:
+            try:
+                has_users = store.has_users()
+            except Exception:
+                raise HTTPException(503, _DATABASE_UNAVAILABLE_MESSAGE) from None
+            if not has_users:
+                status = public_boot_status()
+                raise HTTPException(503, " ".join(filter(None, [status["detail"], _NO_USERS_MESSAGE])))
             raise HTTPException(401, "Invalid username or password")
         user = store.create_user("admin", "Admin", "admin")
     else:
