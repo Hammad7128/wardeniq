@@ -118,6 +118,11 @@ reason.
   running it. Prefer additive changes over breaking ones.
 - **Do not commit generated artifacts, `.env` files, credentials, or
   vendored model weights.**
+- **Environment variables and `.env.example` comments:** Keep comments on
+  their own line above variables, never as inline comments on value lines
+  (e.g. `KEY=val # comment`). Trailing inline comments leak into parsed values
+  under Docker Compose `env_file`, shell `source`, or certain dotenv parsers
+  (which caused issues like `.env comment leaked as ADMIN_EMAIL`).
 
 Python code targets the version pinned in the Docker image. Match the style
 of the file you are editing.
