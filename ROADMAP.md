@@ -92,6 +92,34 @@ Bitbucket come along for free. Two constraints we're committing to up front — 
 when wardenIQ is **not** publicly reachable (the CI job calls us, not the reverse), and it
 must **never fail your build by default**.
 
+### [Agentic PR review](https://github.com/adlerqa/wardeniq/milestone/5) — [#53](https://github.com/adlerqa/wardeniq/issues/53)
+
+wardenIQ watches the repos it's already connected to and **reviews a pull request against the
+requirements it claims to implement** — triggered by marking the PR ready for review, or by
+commenting `/wardeniq review`. Connect a repo once; no workflow files to edit.
+
+This is deliberately **not** a general code reviewer. CodeRabbit, Greptile and others review code
+against code — bugs, style, patterns — and they're good at it. What none of them can say is
+*"this PR claims to implement FR-2, but FR-2 says the token expires in 30 minutes and this sets
+3600 seconds."* That needs the requirements ingested, embedded, versioned and traceable to the
+sentence, which is the one thing we already have. "Does the code work?" is a crowded market;
+"is this what we asked for?" is empty.
+
+Worth being clear that RAG is not the differentiator — every tool in this category does
+retrieval now. What differs is *what* we retrieve over.
+
+Start at **[#54](https://github.com/adlerqa/wardeniq/issues/54)**, which blocks the rest.
+`map_pr_to_feature` currently resolves PRs to features by keyword only — a Jira epic key or a
+manual tag in the PR title — and deliberately gives up otherwise. So on a team that doesn't tag
+PR titles, no PR ever reaches a requirement, and the entire premise falls over. Then the agent
+runtime ([#55](https://github.com/adlerqa/wardeniq/issues/55)) and PR write-back
+([#57](https://github.com/adlerqa/wardeniq/issues/57)), the triggers
+([#56](https://github.com/adlerqa/wardeniq/issues/56)), and a latency budget held throughout
+([#58](https://github.com/adlerqa/wardeniq/issues/58)).
+
+One dependency that isn't technical: **#36 has to be fixed and holding first.** We can't sell
+trustworthy review while generation can still emit its own prompt examples as real output.
+
 ## Later — [Platform](https://github.com/adlerqa/wardeniq/milestone/4)
 
 Cross-cutting work that makes the rest sustainable: structured logging
