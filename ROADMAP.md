@@ -52,8 +52,6 @@ Also in scope: [#44](https://github.com/adlerqa/wardeniq/issues/44) — the sign
 one place a boot failure *isn't* shown, which is exactly where you're stuck — the boot banner
 covering the header including Sign out
 ([#34](https://github.com/adlerqa/wardeniq/issues/34)), README screenshots and a demo GIF
-([#11](https://github.com/adlerqa/wardeniq/issues/11)) — the README currently has no images at
-all — an example PRD so a first run needs no document of your own
 ([#12](https://github.com/adlerqa/wardeniq/issues/12)), and the first tagged release
 ([#18](https://github.com/adlerqa/wardeniq/issues/18)).
 
