@@ -113,6 +113,9 @@ step. It has two variants:
   local demo** — additionally ships a 3-node MongoDB replica set + mongot + Ollama
   in the same Compose stack, with the two default models auto-pulled on first boot
   (~2 GB). Slower generation on CPU but nothing to sign up for.
+  The bundled MongoDB image must be **8.1 or newer** (default is 8.3) — mongot
+  0.65 speaks gRPC only, and the `useGrpcForSearch` parameter it requires is
+  rejected by 8.0.x.
 
 One command per OS — the installer picks the mode:
 
