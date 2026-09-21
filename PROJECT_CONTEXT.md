@@ -285,11 +285,11 @@ Secrets at rest: Fernet in `crypto.py`, keyed off `ENCRYPTION_KEY || APP_SECRET`
 | `SESSION_TTL_SECONDS` / `OTP_TTL_SECONDS` | `604800` / `600` | 7 days / 10 min. |
 | `GITHUB_TOKEN` / `POLL_INTERVAL_SECONDS` / `WEBHOOK_SECRET` | — | GitHub integration. |
 | `SMTP_*` | empty | OTP email fallback (in-app config takes precedence). |
-| `APP_IMAGE` / `MONGO_IMAGE` / `MONGOT_IMAGE` | pinned | Image overrides. |
+| `APP_IMAGE` / `MONGO_IMAGE` / `MONGOT_IMAGE` | pinned | Image overrides; bundled MongoDB must be **8.1+** because `config/mongod.conf` enables `useGrpcForSearch` for mongot's gRPC transport. |
 | `AUTO_SETUP` | `true` | Run index/search setup on boot. |
 
 Ports: app `8001`, mongod `27017`, mongot `27027`/`9946`, ollama `11434`.
-Images pinned: `mongodb-community-server:8.3-ubi9`, `mongodb-community-search:0.65.1`,
+Images pinned: `mongodb-community-server:8.3-ubi9` (MongoDB 8.1+ required), `mongodb-community-search:0.65.1`,
 `ollama/ollama:latest`, app `wardeniq:0.1.0-beta` (source) / `adlerqa/wardeniq:beta` (published).
 
 ---
