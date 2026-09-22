@@ -215,6 +215,8 @@ class TestSmtpAndPasswordLogin:
                 self.users = {}
             def get_user_by_email(self, email):
                 return self.users.get(email)
+            def has_users(self):
+                return bool(self.users)
             def create_user(self, email, name, role):
                 u = {"id": "admin-id-123", "email": email, "name": name, "role": role, "active": True}
                 self.users[email] = u
@@ -252,8 +254,8 @@ class TestSmtpAndPasswordLogin:
         body = self.auth_routes.LoginPasswordIn(username="admin", password="wrongpassword")
         with pytest.raises(self.auth_routes.HTTPException) as exc:
             self.auth_routes.login_password(body, FakeResponse())
-        assert exc.value.status_code == 401
-        assert "Invalid username or password" in exc.value.detail
+        assert exc.value.status_code == 503
+        assert "scripts/reset-admin-password.sh" in exc.value.detail
 
         # 2b. Correct credentials must succeed and bootstrap user
         body = self.auth_routes.LoginPasswordIn(username="admin", password="admin123")

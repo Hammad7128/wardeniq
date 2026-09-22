@@ -14,9 +14,28 @@ async function _smtpStatusWithRetry() {
   }
   return null;
 }
+let loginBootPoll = 0;
+async function refreshLoginBootStatus(poll) {
+  if (poll !== loginBootPoll || $("#login").hidden) return;
+  try {
+    const status = await api("/api/auth/boot-status");
+    if (poll !== loginBootPoll || $("#login").hidden) return;
+    const banner = $("#login-boot-status");
+    banner.textContent = status.ready
+      ? ""
+      : [status.detail, status.recovery].filter(Boolean).join(" ");
+    banner.hidden = status.ready;
+    if (status.ready) return;
+  } catch (e) {
+    // A transient request failure must not erase an already useful diagnosis.
+  }
+  if (poll === loginBootPoll && !$("#login").hidden)
+    setTimeout(() => refreshLoginBootStatus(poll), 3000);
+}
 async function showLogin() {
   ME = null;
   $("#login").hidden = false;
+  void refreshLoginBootStatus(++loginBootPoll);
   $("#usermenu").hidden = true;
   $("#login-err").textContent = "";
   $("#login-msg").textContent = "";
@@ -828,4 +847,3 @@ $("#logout-btn").onclick = async () => {
   } catch (e) {}
   showLogin();
 };
-

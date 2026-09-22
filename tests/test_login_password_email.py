@@ -28,6 +28,9 @@ class FakeStore:
     def get_user_by_email(self, email):
         return self.users.get((email or "").strip().lower())
 
+    def has_users(self):
+        return bool(self.users)
+
     def create_user(self, email, name, role):
         u = {"id": f"id-{email}", "email": email, "name": name, "role": role,
              "active": True, "session_version": 0}
@@ -125,7 +128,7 @@ def test_email_account_without_a_password_cannot_sign_in(routes, monkeypatch):
 
 
 def test_unknown_account_is_rejected(routes, monkeypatch):
-    store = FakeStore()
+    store = FakeStore([_user("admin")])
     with pytest.raises(routes.HTTPException) as exc:
         _login(routes, monkeypatch, store, "nobody@example.com", "whatever")
     assert exc.value.status_code == 401
@@ -137,7 +140,8 @@ def test_unknown_account_cannot_bootstrap_itself_with_the_default(routes, monkey
     with pytest.raises(routes.HTTPException) as exc:
         _login(routes, monkeypatch, store, "attacker@example.com",
                routes.DEFAULT_ADMIN_PASSWORD)
-    assert exc.value.status_code == 401
+    assert exc.value.status_code == 503
+    assert "No user accounts exist" in exc.value.detail
     assert store.users == {}
 
 

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+
 - **Boot / Vector Search failure copy no longer overlays the sticky header.** Long
   `boot.detail` text was injected into absolutely-centered `#status` (`min-width:
   max-content` + `nowrap`), covering the logo, page title, and Sign out / Change
@@ -10,6 +11,7 @@
   banner above the header; `#status` keeps compact service chips only. Raw driver
   exceptions are not the primary visible text — they sit behind a Details control
   (and the console).
+
 - **Boot failures are visible before sign-in.** The login screen now shows safe
   startup diagnostics and names `scripts/reset-admin-password.sh` when no users
   exist. Empty-user password attempts report recovery instructions instead of

@@ -28,7 +28,7 @@ from pydantic import BaseModel
 import coverage as cov
 import extract as extractmod
 import figma
-from extract import chunk as chunk_doc, extract_text
+from extract import chunk as chunk_doc, extract_text, UnsupportedDocumentError
 
 from core import state
 from core.config import GEN_TOTAL
@@ -87,7 +87,10 @@ async def create_feature(request: Request, name: str = Form(...), project_id: st
             continue
         data = await f.read()
         raw_files_info.append((f.filename, data, getattr(f, "content_type", None)))
-        txt = extract_text(f.filename, data)
+        try:
+            txt = extract_text(f.filename, data)
+        except UnsupportedDocumentError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if txt.strip():
             parts.append(f"### Document: {f.filename}\n{txt}")
             sources.append(f.filename)
@@ -221,7 +224,10 @@ async def _read_corpus(files, text):
         if not f or not f.filename:
             continue
         data = await f.read()
-        txt = extract_text(f.filename, data)
+        try:
+            txt = extract_text(f.filename, data)
+        except UnsupportedDocumentError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if txt.strip():
             parts.append(f"### Document: {f.filename}\n{txt}")
             sources.append(f.filename)
@@ -247,7 +253,10 @@ async def new_version(fid: str, text: str = Form(""), name: str = Form(""), key:
         if not f or not f.filename:
             continue
         data = await f.read()
-        txt = extract_text(f.filename, data)
+        try:
+            txt = extract_text(f.filename, data)
+        except UnsupportedDocumentError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if txt.strip():
             parts.append(f"### Document: {f.filename}\n{txt}")
             sources.append(f.filename)
