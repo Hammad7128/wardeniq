@@ -5,6 +5,7 @@
   "type": "module",
   "description": "WardenIQ production frontend — React + Vite + Tailwind with feature-based architecture.",
   "scripts": {
+    "test": "node --test",
     "dev": "node ./node_modules/vite/bin/vite.js",
     "build": "vite build",
     "preview": "vite preview",

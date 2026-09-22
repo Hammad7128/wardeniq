@@ -6,6 +6,7 @@ Moved out of store.py (Phase 5 of REFACTOR_PLAN.md).
 import time
 
 from bson import ObjectId
+from pymongo import timeout
 
 
 from typing import TYPE_CHECKING
@@ -67,6 +68,11 @@ class UsersAuthMixin(_Base):
 
     def count_users(self):
         return self.users.count_documents({})
+
+    def has_users(self):
+        """Bound public diagnostics when MongoDB is down; never load user data."""
+        with timeout(1):
+            return self.users.find_one({}, {"_id": 1}) is not None
 
     def count_active_admins(self):
         return self.users.count_documents({"role": "admin", "active": True})
