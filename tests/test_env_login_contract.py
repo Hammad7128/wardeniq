@@ -189,3 +189,30 @@ def test_reset_admin_password_overrides_an_existing_password(app_modules, monkey
     bootstrap._seed_bootstrap_password()
     for who in ("admin", ADMIN_EMAIL):
         assert auth.password_matches(store.users[who]["password_hash"], forced)
+
+
+def test_env_example_has_no_inline_comments():
+    """Ensure no variable lines in .env.example contain inline '#' comments.
+
+    Trailing comments on value lines leak into parsed environment variables
+    under Docker Compose env_file, shell source, or certain dotenv parsers.
+    Comments must live on their own lines above the variable.
+    """
+    import re
+    from pathlib import Path
+
+    env_path = Path(__file__).resolve().parent.parent / ".env.example"
+    assert env_path.exists(), ".env.example should exist at repo root"
+
+    inline_comment_pattern = re.compile(r"^[A-Z_]+=.*#")
+    violations = []
+
+    for lineno, line in enumerate(env_path.read_text(encoding="utf-8").splitlines(), 1):
+        if inline_comment_pattern.match(line):
+            violations.append(f"Line {lineno}: {line}")
+
+    assert not violations, (
+        f"Found inline comments in .env.example:\n" + "\n".join(violations) +
+        "\nMove comments onto their own line above the variable."
+    )
+
