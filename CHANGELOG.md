@@ -10,6 +10,11 @@
   banner above the header; `#status` keeps compact service chips only. Raw driver
   exceptions are not the primary visible text — they sit behind a Details control
   (and the console).
+- **Boot failures are visible before sign-in.** The login screen now shows safe
+  startup diagnostics and names `scripts/reset-admin-password.sh` when no users
+  exist. Empty-user password attempts report recovery instructions instead of
+  invalid credentials. Raw driver exceptions are never exposed by the public
+  boot-status endpoint; healthy sign-in keeps its existing appearance.
 - **A saved Jira (or LLM/SMTP) integration could silently disappear later, with
   no error at save time and no sign-out in between.** `app/store/base.py`
   connected to MongoDB with pymongo's default write concern (`w=1`,

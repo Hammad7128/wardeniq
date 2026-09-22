@@ -1078,6 +1078,11 @@ window.clickBreadcrumb = function (stepId) {
 // Shown when boot failed but the API still has a raw driver exception in boot.detail.
 const BOOT_VECTOR_SEARCH_MSG =
   "wardenIQ requires a MongoDB with Vector Search — it's where embeddings are searched. The database at MONGO_URI doesn't have it. Use MongoDB Atlas (search built in) or a self-managed MongoDB running mongot, then restart.";
+// Allowlist of KNOWN-SAFE, canned messages (all authored by app/core/bootstrap.py —
+// see _SEARCH_REQUIRED_MSG, _SEARCH_INDEX_LIMIT_MSG, and the insecure-secret /
+// insecure-production-posture messages in _check_app_secret / _check_production_posture).
+// Anything NOT in this list is treated as potentially-raw backend/driver text and kept
+// out of the primary summary (see looksLikeRawBootDetail below).
 const BOOT_SAFE_DETAIL_MARKERS = [
   "requires a MongoDB with Vector Search",
   "doesn't allow enough search indexes",
@@ -1085,30 +1090,21 @@ const BOOT_SAFE_DETAIL_MARKERS = [
   "insecure production configuration",
 ];
 
+// Deliberately an ALLOWLIST, not a blocklist: boot.detail can carry an arbitrary
+// exception from any driver/library in the backend's call stack (pymongo, the OS
+// resolver, mongot, …), and that space is unbounded — a blocklist of known raw-dump
+// signatures (msgLen/ProtocolError/pymongo/etc.) will always be one exception shape
+// behind (confirmed in practice: a plain `pymongo.errors.ConfigurationError` DNS
+// failure matched none of the old signatures and was shown verbatim as the primary
+// banner text). The set of SAFE messages, by contrast, is small and entirely owned
+// by this app (BOOT_SAFE_DETAIL_MARKERS above) — enumerating what we trust is
+// tractable in a way enumerating what we don't trust never is. So: safe only if it
+// matches a known canned message; everything else stays behind the Details
+// disclosure, regardless of whether it happens to look like a "recognizable" dump.
 function looksLikeRawBootDetail(detail) {
   const d = String(detail || "");
   if (!d) return false;
-  if (BOOT_SAFE_DETAIL_MARKERS.some((m) => d.includes(m))) return false;
-  return (
-    /^index retry:/i.test(d) ||
-    /^job recovery:/i.test(d) ||
-    /^migrate:/i.test(d) ||
-    /^admin seed:/i.test(d) ||
-    /^admin password seed:/i.test(d) ||
-    /full error:/i.test(d) ||
-    /msgLen/i.test(d) ||
-    /ProtocolError/i.test(d) ||
-    /codeName/i.test(d) ||
-    /\$clusterTime/.test(d) ||
-    /Timestamp\(/.test(d) ||
-    /pymongo/i.test(d) ||
-    /Traceback \(most recent call last\)/i.test(d) ||
-    /ServerSelectionTimeoutError/i.test(d) ||
-    /AutoReconnect/i.test(d) ||
-    /OperationFailure/i.test(d) ||
-    /recv\(\):/i.test(d) ||
-    /\{\s*['"]ok['"]\s*:/.test(d)
-  );
+  return !BOOT_SAFE_DETAIL_MARKERS.some((m) => d.includes(m));
 }
 
 function formatBootStatus(boot) {
