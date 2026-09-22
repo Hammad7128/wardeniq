@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Generation no longer persists prompt few-shot exemplars as real test cases.**
+  Cases whose title, intent, or preconditions copy the examples in
+  `app/testgen/prompt_builder.py` (including hybrid titles that keep the
+  event-host scaffolding) are dropped before persist. When edge evidence is
+  insufficient the shared E2E call's `edge_cases` block is discarded instead of
+  being stored as `nfr`, and e2e/nfr cases with zero overlap against the source
+  documents are rejected.
+
 - **Boot / Vector Search failure copy no longer overlays the sticky header.** Long
   `boot.detail` text was injected into absolutely-centered `#status` (`min-width:
   max-content` + `nowrap`), covering the logo, page title, and Sign out / Change

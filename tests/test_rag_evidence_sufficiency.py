@@ -480,10 +480,9 @@ class ApiEdgeAndE2eEvidenceTests(unittest.TestCase):
         self.assertEqual([], llm.calls_matching("Generate focused API worker test cases"))
         self.assertIn("api", result.get("evidence_insufficient", []))
 
-    def test_edge_insufficiency_is_reported_rather_than_silently_trusted(self):
-        """edge_cases have no standalone call -- they ride the E2E call, so they cannot
-        be skipped without taking E2E down too. What they get instead is an explicit
-        'generated without dedicated evidence' note on the job."""
+    def test_edge_insufficiency_drops_the_suppressed_block(self):
+        """edge_cases ride the E2E call, so that call still runs. The returned
+        edge block must not persist as nfr when edge evidence was insufficient."""
         store = self._no_endpoint_store()
         llm = self._grounded_digest_llm(edge_cases=[{
             "title": "An idle workspace must still record that the digest job ran",
@@ -492,8 +491,15 @@ class ApiEdgeAndE2eEvidenceTests(unittest.TestCase):
         }])
         result = _run(store, llm)
         self.assertIn("edge", result.get("evidence_insufficient", []))
+        self.assertNotIn(
+            "An idle workspace must still record that the digest job ran",
+            _titles(store),
+        )
         self.assertTrue(
             any(warning.startswith("edge:") for warning in result.get("warnings", [])),
+        )
+        self.assertTrue(
+            any("no supporting evidence" in warning for warning in result.get("warnings", [])),
         )
 
     def test_fabricated_numeric_claims_are_dropped_in_e2e_edge_and_business_alike(self):

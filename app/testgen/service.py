@@ -19,7 +19,9 @@ from testgen.prompt_builder import (
     build_repair_prompt,
     build_ui_agent_prompt,
     filter_hallucinated_entities,
+    filter_prompt_exemplar_copies,
     is_few_shot_leak,
+    is_prompt_exemplar_copy,
 )
 from testgen.lineage import (
     REUSE_SIMILARITY_API,
@@ -674,6 +676,64 @@ def _filter_ungrounded_claims(cases: list[dict], corpus: str) -> list[dict]:
     return [
         case for case in cases
         if isinstance(case, dict) and not _unsupported_numeric_claims(case, corpus_tokens)
+    ]
+
+
+_SOURCE_GROUNDING_TOKEN = re.compile(r"[a-zA-Z][a-zA-Z0-9]{3,}")
+_SOURCE_GROUNDING_STOP = {
+    "must", "will", "with", "from", "that", "this", "when", "then", "into",
+    "only", "also", "does", "done", "have", "been", "being", "they", "them",
+    "their", "there", "these", "those", "same", "each", "both", "over",
+    "after", "before", "still", "able", "used", "using", "make", "made",
+}
+
+
+def _case_grounding_text(case: dict) -> str:
+    parts = [
+        case.get("title"),
+        case.get("intent"),
+        case.get("description"),
+        case.get("expected_behavior"),
+    ]
+    preconditions = case.get("preconditions") or []
+    if isinstance(preconditions, (list, tuple)):
+        parts.extend(preconditions)
+    else:
+        parts.append(preconditions)
+    parts.extend(case.get("ui_journey_steps") or [])
+    parts.extend(case.get("backend_assertions") or [])
+    for step in case.get("steps") or []:
+        if isinstance(step, dict):
+            parts.append(step.get("content") or step.get("action"))
+            parts.append(step.get("expectedResult") or step.get("expected"))
+        else:
+            parts.append(step)
+    return " ".join(str(part) for part in parts if part)
+
+
+def _case_has_source_grounding(case: dict, corpus: str) -> bool:
+    """True when at least one content token from the case appears in the source corpus.
+
+    e2e / nfr previously shipped on a category-level 'feature has a description'
+    verdict even when the case itself had zero overlap with the documents. That
+    let prompt few-shots persist as if they belonged to the user's feature."""
+    if not isinstance(case, dict):
+        return False
+    corpus_l = str(corpus or "").lower()
+    if not corpus_l.strip():
+        return False
+    tokens = {
+        token.lower()
+        for token in _SOURCE_GROUNDING_TOKEN.findall(_case_grounding_text(case))
+        if token.lower() not in _SOURCE_GROUNDING_STOP
+    }
+    return any(re.search(rf"\b{re.escape(token)}\b", corpus_l) for token in tokens)
+
+
+def _filter_ungrounded_suite_cases(cases: list[dict], corpus: str) -> list[dict]:
+    return [
+        case for case in (cases or [])
+        if isinstance(case, dict) and _case_has_source_grounding(case, corpus)
     ]
 
 
@@ -1507,6 +1567,13 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
                         f"({original.get('title') or original.get('id')})"
                     )
                     continue
+                if is_prompt_exemplar_copy(repaired, corpus):
+                    errors.append(
+                        "Inherited test not carried over: the adapted version copied "
+                        "a prompt few-shot exemplar "
+                        f"({original.get('title') or original.get('id')})"
+                    )
+                    continue
                 _persist_case(
                     store,
                     embedder,
@@ -1773,6 +1840,21 @@ def generate_fresh_testcases_pipeline(store, llm, embedder, params, update_job_f
         name: _filter_ungrounded_claims(cases, corpus)
         for name, cases in suites.items()
     }
+    # Prompt few-shots are examples, not the user's feature. Reject verbatim and
+    # hybrid copies on every suite before persist (issue #36).
+    suites = {
+        name: filter_prompt_exemplar_copies(cases, corpus)
+        for name, cases in suites.items()
+    }
+    # e2e / nfr must have some source overlap. Category-level "feature has a
+    # description" was enough to let an ungrounded E2E exemplar ship.
+    for suite_name in ("e2e_tests", "edge_cases"):
+        suites[suite_name] = _filter_ungrounded_suite_cases(suites[suite_name], corpus)
+    # When edge evidence was insufficient we still ran the shared E2E call, and
+    # whatever came back in edge_cases was persisted as nfr. Drop that suppressed
+    # block; copies stuffed into e2e_tests are already removed above.
+    if not evidence_sufficient.get("edge"):
+        suites["edge_cases"] = []
 
     suites = _budget_suites(
         suites, total, focus, smoke_mode=bool(params.get("smoke_mode"))
