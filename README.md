@@ -209,6 +209,8 @@ Beta. Known rough edges: generation speed/quality scale with the local model; Gi
 analysis needs a PAT for private repos; LLM mapping is best with descriptive docs.
 Contributions welcome.
 
+See [ROADMAP.md](ROADMAP.md) for what's next and where you can help.
+
 ## License
 
 [MIT](LICENSE) — free for commercial and non-commercial use.
