@@ -20,6 +20,13 @@ export default function ApplicationFrame() {
     <div className="app min-h-screen" id="app-shell">
       <Sidebar />
       <div className="content min-w-0">
+        <div
+          className="boot-banner"
+          id="boot-banner"
+          hidden
+          role="status"
+          aria-live="polite"
+        />
         <Header />
         <main>
       <div className="ro-banner" id="ro-banner" hidden>
