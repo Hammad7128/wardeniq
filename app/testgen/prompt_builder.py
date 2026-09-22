@@ -16,6 +16,124 @@ INFRASTRUCTURE_DENY_LIST = {
 
 TEST_TYPES = ["functional", "e2e", "api", "nfr"]
 
+# Few-shot strings interpolated into generation prompts. Persist must reject any
+# generated case that copies these — they are examples, not the user's feature.
+# Keep this block as the single source of truth for both prompt text and the filter.
+PROMPT_EXEMPLAR_E2E_TITLE = (
+    "Host creates event then PostgreSQL write fails on participant join — state remains consistent"
+)
+PROMPT_EXEMPLAR_E2E_INTENT = (
+    "Verify that a failed participant join does not leave an orphaned join_request row in the database"
+)
+PROMPT_EXEMPLAR_E2E_PRECONDITIONS = (
+    "An authenticated host user exists with a confirmed upcoming event",
+    "PostgreSQL is configured to fail writes to the join_requests table after the first insert",
+)
+
+PROMPT_EXEMPLAR_EDGE_TITLE = "Concurrent host delete and participant join on the same event"
+PROMPT_EXEMPLAR_EDGE_INTENT = (
+    "Two simultaneous mutations to the same event resource must produce a deterministic non-corrupt outcome"
+)
+
+PROMPT_EXEMPLAR_BUSINESS_TITLE = (
+    "Non-host users cannot delete an event even when the auth service is degraded"
+)
+PROMPT_EXEMPLAR_BUSINESS_INTENT = (
+    "Only the event host may delete their own event, even when the auth service is returning 200 for all permission checks due to a misconfiguration."
+)
+
+PROMPT_EXEMPLAR_E2E_FALLBACK_TITLE = (
+    "User completes the primary feature flow from form input to persisted backend state"
+)
+PROMPT_EXEMPLAR_E2E_FALLBACK_INTENT = (
+    "Verify the main user journey succeeds across UI, API, and database state"
+)
+PROMPT_EXEMPLAR_E2E_FALLBACK_PRECONDITIONS = (
+    "An authenticated user is available",
+    "Required feature data exists",
+)
+
+PROMPT_EXEMPLAR_BUSINESS_FALLBACK_TITLE = "Only the event host can delete their own event"
+PROMPT_EXEMPLAR_BUSINESS_FALLBACK_INTENT = (
+    "Event deletion is restricted to the host user who created the event."
+)
+
+PROMPT_EXEMPLAR_API_TITLE = "Participant receives 403 when attempting to create an event"
+PROMPT_EXEMPLAR_API_INTENT = "Only hosts can create events; this verifies the role-based boundary."
+
+PROMPT_EXEMPLAR_REPAIR_TITLE = "Non-host receives 403 when attempting to update event details"
+PROMPT_EXEMPLAR_REPAIR_INTENT = (
+    "RAG gap: the authorization check for the event update endpoint was not covered by any existing test"
+)
+
+# Domain-specific few-shots may also be rejected on fuzzy title overlap. The
+# generic E2E fallback is exact-match only so ordinary "user completes … flow"
+# wording is not treated as a leak.
+PROMPT_EXEMPLAR_CASES = (
+    {
+        "title": PROMPT_EXEMPLAR_E2E_TITLE,
+        "intent": PROMPT_EXEMPLAR_E2E_INTENT,
+        "preconditions": list(PROMPT_EXEMPLAR_E2E_PRECONDITIONS),
+        "fuzzy": True,
+    },
+    {
+        "title": PROMPT_EXEMPLAR_EDGE_TITLE,
+        "intent": PROMPT_EXEMPLAR_EDGE_INTENT,
+        "fuzzy": True,
+    },
+    {
+        "title": PROMPT_EXEMPLAR_BUSINESS_TITLE,
+        "intent": PROMPT_EXEMPLAR_BUSINESS_INTENT,
+        "fuzzy": True,
+    },
+    {
+        "title": PROMPT_EXEMPLAR_E2E_FALLBACK_TITLE,
+        "intent": PROMPT_EXEMPLAR_E2E_FALLBACK_INTENT,
+        "preconditions": list(PROMPT_EXEMPLAR_E2E_FALLBACK_PRECONDITIONS),
+        "fuzzy": False,
+    },
+    {
+        "title": PROMPT_EXEMPLAR_BUSINESS_FALLBACK_TITLE,
+        "intent": PROMPT_EXEMPLAR_BUSINESS_FALLBACK_INTENT,
+        "fuzzy": True,
+    },
+    {
+        "title": PROMPT_EXEMPLAR_API_TITLE,
+        "intent": PROMPT_EXEMPLAR_API_INTENT,
+        "fuzzy": True,
+    },
+    {
+        "title": PROMPT_EXEMPLAR_REPAIR_TITLE,
+        "intent": PROMPT_EXEMPLAR_REPAIR_INTENT,
+        "fuzzy": True,
+    },
+)
+
+# Distinctive scaffolding / entities from the event-host few-shots. Used to
+# catch hybrids that keep the example's frame and swap in a real PRD clause.
+PROMPT_EXEMPLAR_SCAFFOLDING = (
+    "host creates event then",
+    "state remains consistent",
+    "concurrent host delete and participant join",
+    "orphaned join_request",
+    "join_requests table",
+    "non-host users cannot delete an event",
+    "only the event host",
+    "participant receives 403 when attempting to create an event",
+    "non-host receives 403 when attempting to update event",
+)
+PROMPT_EXEMPLAR_ENTITIES = (
+    "join_request",
+    "join_requests",
+    "participant join",
+    "event host",
+    "host user",
+    "postgresql write",
+)
+_EXEMPLAR_TOKEN = re.compile(r"[a-z0-9]+")
+_EXEMPLAR_FUZZY_TITLE_JACCARD = 0.5
+
+
 def output_contract_header(task_name: str) -> str:
     return "\n".join([
         f"TASK: {task_name}",
@@ -421,6 +539,98 @@ def is_few_shot_leak(item: any, lowercase_corpus: str = None) -> bool:
         return True
         
     return False
+
+
+def _normalize_exemplar_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "\n".join(
+            _normalize_exemplar_text(item) for item in value if item not in (None, "")
+        )
+    text = " ".join(str(value).split()).strip().lower()
+    return text.replace("\u2014", "-").replace("\u2013", "-")
+
+
+def _exemplar_token_set(text: str) -> set[str]:
+    return {
+        token
+        for token in _EXEMPLAR_TOKEN.findall(_normalize_exemplar_text(text))
+        if len(token) > 2
+    }
+
+
+def _exemplar_jaccard(left: str, right: str) -> float:
+    a, b = _exemplar_token_set(left), _exemplar_token_set(right)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _case_exemplar_fields(case: dict) -> dict:
+    preconditions = case.get("preconditions") or []
+    if not isinstance(preconditions, (list, tuple)):
+        preconditions = [preconditions]
+    return {
+        "title": _normalize_exemplar_text(case.get("title")),
+        "intent": _normalize_exemplar_text(case.get("intent")),
+        "preconditions": [
+            _normalize_exemplar_text(item) for item in preconditions if str(item).strip()
+        ],
+        "blob": _normalize_exemplar_text([
+            case.get("title"),
+            case.get("intent"),
+            case.get("description"),
+            case.get("expected_behavior"),
+            *preconditions,
+        ]),
+    }
+
+
+def is_prompt_exemplar_copy(case: dict, corpus: str = "") -> bool:
+    """True when a generated case is a verbatim or hybrid copy of a prompt few-shot."""
+    if not isinstance(case, dict):
+        return False
+    fields = _case_exemplar_fields(case)
+    if not fields["title"] and not fields["intent"] and not fields["preconditions"]:
+        return False
+
+    for exemplar in PROMPT_EXEMPLAR_CASES:
+        ex_title = _normalize_exemplar_text(exemplar.get("title"))
+        ex_intent = _normalize_exemplar_text(exemplar.get("intent"))
+        ex_pre = [
+            _normalize_exemplar_text(item) for item in (exemplar.get("preconditions") or [])
+        ]
+        if fields["title"] and ex_title and fields["title"] == ex_title:
+            return True
+        if fields["intent"] and ex_intent and fields["intent"] == ex_intent:
+            return True
+        if fields["preconditions"] and ex_pre and fields["preconditions"] == ex_pre:
+            return True
+        if (
+            exemplar.get("fuzzy")
+            and fields["title"]
+            and ex_title
+            and _exemplar_jaccard(fields["title"], ex_title) >= _EXEMPLAR_FUZZY_TITLE_JACCARD
+        ):
+            return True
+
+    corpus_n = _normalize_exemplar_text(corpus)
+    blob = fields["blob"]
+    if any(phrase in blob and phrase not in corpus_n for phrase in PROMPT_EXEMPLAR_SCAFFOLDING):
+        return True
+    ungrounded = [entity for entity in PROMPT_EXEMPLAR_ENTITIES if entity in blob and entity not in corpus_n]
+    return len(ungrounded) >= 2
+
+
+def filter_prompt_exemplar_copies(cases: list, corpus: str = "") -> list:
+    """Drop generated cases that copied a prompt few-shot exemplar."""
+    return [
+        case
+        for case in (cases or [])
+        if isinstance(case, dict) and not is_prompt_exemplar_copy(case, corpus)
+    ]
+
 
 def filter_hallucinated_entities(entities: list, lowercase_corpus: str = None) -> list:
     out = []
@@ -869,8 +1079,8 @@ OUTPUT SCHEMA — begin with endpoint_analysis, then api_tests:
   "api_tests": [
     {{
       "id": "API-1",
-      "title": "Participant receives 403 when attempting to create an event",
-      "intent": "Only hosts can create events; this verifies the role-based boundary.",
+      "title": "{PROMPT_EXEMPLAR_API_TITLE}",
+      "intent": "{PROMPT_EXEMPLAR_API_INTENT}",
       "test_suite": "Regression",
       "priority": "High",
       "confidence": 0.95,
@@ -1220,14 +1430,14 @@ The values below are examples — replace each one with real values from the evi
   "e2e_tests": [
     {{
       "id": "E2E-1",
-      "title": "Host creates event then PostgreSQL write fails on participant join — state remains consistent",
-      "intent": "Verify that a failed participant join does not leave an orphaned join_request row in the database",
+      "title": "{PROMPT_EXEMPLAR_E2E_TITLE}",
+      "intent": "{PROMPT_EXEMPLAR_E2E_INTENT}",
       "test_suite": "Chaos",
       "priority": "High",
       "confidence": 0.88,
       "preconditions": [
-        "An authenticated host user exists with a confirmed upcoming event",
-        "PostgreSQL is configured to fail writes to the join_requests table after the first insert"
+        "{PROMPT_EXEMPLAR_E2E_PRECONDITIONS[0]}",
+        "{PROMPT_EXEMPLAR_E2E_PRECONDITIONS[1]}"
       ],
       "ui_journey_steps": [
         "Participant navigates to the event detail screen",
@@ -1245,8 +1455,8 @@ The values below are examples — replace each one with real values from the evi
   "edge_cases": [
     {{
       "id": "EDGE-1",
-      "title": "Concurrent host delete and participant join on the same event",
-      "intent": "Two simultaneous mutations to the same event resource must produce a deterministic non-corrupt outcome",
+      "title": "{PROMPT_EXEMPLAR_EDGE_TITLE}",
+      "intent": "{PROMPT_EXEMPLAR_EDGE_INTENT}",
       "test_suite": "Chaos",
       "priority": "High",
       "confidence": 0.82,
@@ -1256,8 +1466,8 @@ The values below are examples — replace each one with real values from the evi
   "business_tests": [
     {{
       "id": "BUS-1",
-      "title": "Non-host users cannot delete an event even when the auth service is degraded",
-      "intent": "Only the event host may delete their own event, even when the auth service is returning 200 for all permission checks due to a misconfiguration.",
+      "title": "{PROMPT_EXEMPLAR_BUSINESS_TITLE}",
+      "intent": "{PROMPT_EXEMPLAR_BUSINESS_INTENT}",
       "test_suite": "Chaos",
       "priority": "High",
       "confidence": 0.95,
@@ -1349,14 +1559,14 @@ The values below are examples - replace each one with real values from the evide
   "e2e_tests": [
     {{
       "id": "E2E-1",
-      "title": "User completes the primary feature flow from form input to persisted backend state",
-      "intent": "Verify the main user journey succeeds across UI, API, and database state",
+      "title": "{PROMPT_EXEMPLAR_E2E_FALLBACK_TITLE}",
+      "intent": "{PROMPT_EXEMPLAR_E2E_FALLBACK_INTENT}",
       "test_suite": "Smoke",
       "priority": "High",
       "confidence": 0.90,
       "preconditions": [
-        "An authenticated user is available",
-        "Required feature data exists"
+        "{PROMPT_EXEMPLAR_E2E_FALLBACK_PRECONDITIONS[0]}",
+        "{PROMPT_EXEMPLAR_E2E_FALLBACK_PRECONDITIONS[1]}"
       ],
       "ui_journey_steps": [
         "User opens the relevant feature screen",
@@ -1428,8 +1638,8 @@ The values below are examples — replace each one with a real value from the ev
   "business_tests": [
     {{
       "id": "BUS-1",
-      "title": "Only the event host can delete their own event",
-      "intent": "Event deletion is restricted to the host user who created the event.",
+      "title": "{PROMPT_EXEMPLAR_BUSINESS_FALLBACK_TITLE}",
+      "intent": "{PROMPT_EXEMPLAR_BUSINESS_FALLBACK_INTENT}",
       "test_suite": "Regression",
       "priority": "High",
       "confidence": 0.95,
@@ -1525,8 +1735,8 @@ The values below are examples — replace each one with real values from the evi
     "tests_to_add": [
       {{
         "id": "API-NEW-1",
-        "title": "Non-host receives 403 when attempting to update event details",
-        "intent": "RAG gap: the authorization check for the event update endpoint was not covered by any existing test",
+        "title": "{PROMPT_EXEMPLAR_REPAIR_TITLE}",
+        "intent": "{PROMPT_EXEMPLAR_REPAIR_INTENT}",
         "test_suite": "Regression",
         "priority": "High",
         "confidence": 0.90,
