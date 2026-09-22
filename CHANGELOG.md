@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Fixed the installer script links in `docs/configuration.md` to resolve to the
+  repository root after the documentation move (#61).
+
 - **Generation no longer persists prompt few-shot exemplars as real test cases.**
   Cases whose title, intent, or preconditions copy the examples in
   `app/testgen/prompt_builder.py` (including hybrid titles that keep the
